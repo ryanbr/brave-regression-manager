@@ -125,17 +125,29 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
         cmd.arg("--disable-gpu");
     }
 
-    // Unix (macOS + Linux): Chromium tries to read/create a `Brave Safe
-    // Storage` key in the OS keychain on every launch (login keychain on
-    // macOS; gnome-libsecret or KWallet on Linux). The unlock prompt is
-    // just friction for a regression-testing harness — we don't need
-    // encrypted credential persistence between throwaway Nightly installs.
-    // `basic` falls back to an obfuscation-only store so Brave never
-    // touches the keychain. Windows uses CryptProtectData with no prompt,
-    // so it doesn't need this.
+    // Suppress every keychain / credential-store prompt Chromium would
+    // otherwise raise. brave-regress is a regression-testing harness, not
+    // a daily browser — encrypted credential persistence between throwaway
+    // Nightly installs is friction without value.
+    //
+    // Two separate Chromium subsystems prompt:
+    //   1. The password-manager backend (`--password-store`). Default
+    //      auto-detects gnome-libsecret / KWallet / mac-keychain.
+    //   2. `OSCrypt`, which encrypts cookies / per-site data with a master
+    //      key stored in the OS keychain. `--password-store` does NOT
+    //      cover this — on macOS we also need `--use-mock-keychain`,
+    //      which is Chromium's testing flag for bypassing the real
+    //      keychain entirely.
+    //
+    // Windows uses CryptProtectData with no user-visible prompt, so it
+    // doesn't need either flag.
     #[cfg(unix)]
     {
         cmd.arg("--password-store=basic");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        cmd.arg("--use-mock-keychain");
     }
 
     // Brave / Chromium logging flags. `--enable-logging=stderr` is the
