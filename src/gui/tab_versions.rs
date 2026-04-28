@@ -431,11 +431,23 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         }
                     }
                 }
-                if state.running.contains_key(&v.tag) && ui.button("Stop").clicked() {
+                if state.running.contains_key(&v.tag) && ui.button("Stop")
+                    .on_hover_text("Force-kill Brave and every helper/renderer it spawned")
+                    .clicked()
+                {
                     if let Some(mut r) = state.running.remove(&v.tag) {
+                        let pid = r.child.id();
+                        // Hard kill the entire process tree first — this
+                        // catches orphaned Helper / Renderer / GPU children
+                        // that Child::kill alone would leave running.
+                        versions::launch::force_kill_tree(pid);
+                        // Then reap our direct child handle so we don't
+                        // leak a zombie pid.
                         let _ = r.child.kill();
                         let _ = r.child.wait();
-                        state.status_msg = format!("stopped {}", v.tag);
+                        state.status_msg = format!("force-killed {} (pid {pid})", v.tag);
+                        crate::console::info(&state.console, "launch",
+                            format!("force-killed {} (pid {pid})", v.tag));
                     }
                 }
 

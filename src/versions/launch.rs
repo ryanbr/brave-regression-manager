@@ -177,6 +177,40 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
     Ok(cmd.spawn()?)
 }
 
+/// Force-kill a Brave parent process AND every descendant. `Child::kill`
+/// only nukes the parent; helper / renderer / GPU / network-service
+/// children usually self-exit when the parent dies, but a hung parent or
+/// a launcher fork can leave orphans behind. Walks the platform's
+/// process tree to make sure nothing survives.
+///
+/// All errors are silenced — this is a best-effort nuke; if some PIDs
+/// are already gone or unreachable we don't care.
+pub fn force_kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        // /F = force, /T = whole tree (the spawned PID + every descendant).
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID"])
+            .arg(pid.to_string())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        // Two-step nuke: first SIGKILL every direct + indirect descendant,
+        // then SIGKILL the parent. pkill -P walks one level at a time but
+        // -P with --signal KILL kills children before they can spawn more.
+        // The follow-up `kill -KILL <pid>` makes sure the parent itself
+        // dies even if its children were hanging.
+        let _ = std::process::Command::new("pkill")
+            .args(["-KILL", "-P"])
+            .arg(pid.to_string())
+            .status();
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+}
+
 /// Read the auto-picked CDP port from `<user-data-dir>/DevToolsActivePort`.
 /// File format: first line is the port, second line is the websocket path.
 pub fn read_cdp_port(profile: &str) -> Result<u16> {

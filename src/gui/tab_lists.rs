@@ -72,7 +72,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     .filter(|(_, r)| r.profile == prof).map(|(t,_)| t.clone()).collect();
                 for t in to_stop {
                     if let Some(mut r) = state.running.remove(&t) {
-                        let _ = r.child.kill(); let _ = r.child.wait();
+                        // Tree-kill so orphaned Brave helpers from the
+                        // previous run don't survive into the relaunch.
+                        versions::launch::force_kill_tree(r.child.id());
+                        let _ = r.child.kill();
+                        let _ = r.child.wait();
                     }
                 }
                 let row_args = crate::verdict::launch_args(&tag);
