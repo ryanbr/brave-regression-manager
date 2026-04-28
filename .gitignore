@@ -1,0 +1,14 @@
+# Rust build outputs
+/target/
+
+# Editor / OS junk
+*.swp
+*.swo
+*.bak
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# User data this app writes at runtime — should never end up in the repo.
+brave-regress/

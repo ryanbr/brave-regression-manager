@@ -1,0 +1,7 @@
+[target.x86_64-pc-windows-gnu]
+linker    = "x86_64-w64-mingw32-gcc"
+ar        = "x86_64-w64-mingw32-ar"
+
+# Static-link the C/C++ runtimes so the resulting .exe doesn't need MinGW DLLs
+# alongside it. Lets the user just copy brave-regress.exe to any Windows host.
+rustflags = ["-C", "link-args=-static -static-libgcc -static-libstdc++"]

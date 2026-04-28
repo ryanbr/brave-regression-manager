@@ -1,0 +1,467 @@
+use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
+
+const OWNER: &str = "brave";
+const REPO:  &str = "brave-browser";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub size: u64,
+    pub browser_download_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Release {
+    pub tag: String,
+    pub name: String,
+    pub published_at: String,
+    pub prerelease: bool,
+    pub assets: Vec<ReleaseAsset>,
+    /// Filename of the asset selected for the current platform, if any.
+    /// `None` means this release has no installer for the host (e.g.
+    /// mobile-only releases that ship `.apk` / `.aab` only).
+    #[serde(default)]
+    pub host_asset: Option<String>,
+}
+
+/// Brave release channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel { Release, Beta, Nightly }
+
+/// Which channels the user wants to see in the available-releases list.
+#[derive(Debug, Clone, Copy)]
+pub struct ChannelFilter {
+    pub release: bool,
+    pub beta:    bool,
+    pub nightly: bool,
+}
+
+impl Default for ChannelFilter {
+    fn default() -> Self { Self { release: false, beta: false, nightly: true } }
+}
+
+impl ChannelFilter {
+    pub fn allows(self, c: Channel) -> bool {
+        match c {
+            Channel::Release => self.release,
+            Channel::Beta    => self.beta,
+            Channel::Nightly => self.nightly,
+        }
+    }
+    /// Guard against an all-off filter — the GUI clamps to Nightly when the
+    /// user unchecks every box, but be defensive here too.
+    pub fn nonempty(self) -> Self {
+        if !self.release && !self.beta && !self.nightly {
+            Self { release: false, beta: false, nightly: true }
+        } else { self }
+    }
+}
+
+/// Decide a release's channel by inspecting its asset filenames first
+/// (most accurate — Brave's asset names embed `nightly`/`beta`/no-marker)
+/// and falling back to the GitHub `prerelease` flag when the assets list
+/// is empty (build job hasn't uploaded yet).
+pub fn detect_release_channel(release: &Release) -> Channel {
+    let any_nightly = release.assets.iter().any(|a| a.name.to_lowercase().contains("nightly"));
+    if any_nightly { return Channel::Nightly; }
+    let any_beta = release.assets.iter().any(|a| {
+        let l = a.name.to_lowercase();
+        l.contains("beta") && !l.contains("nightly")
+    });
+    if any_beta { return Channel::Beta; }
+    // No marker → either a stable release, or a prerelease whose assets
+    // are channel-marker-free (e.g. Windows portable .zip).
+    if release.prerelease { Channel::Nightly } else { Channel::Release }
+}
+
+impl Release {
+    pub fn has_host_installer(&self) -> bool { self.host_asset.is_some() }
+
+    /// Short reason why a release is not installable. Empty when it is.
+    pub fn skip_reason(&self) -> String {
+        if self.host_asset.is_some() { return String::new(); }
+        if self.assets.is_empty() { return "no assets yet".into(); }
+        let exts: std::collections::BTreeSet<&str> = self.assets.iter()
+            .filter_map(|a| a.name.rsplit_once('.').map(|(_, e)| e))
+            .collect();
+        // Mobile-only?
+        let only_mobile = exts.iter().all(|e| matches!(*e, "apk" | "aab" | "asc" | "sha256"))
+            && exts.iter().any(|e| matches!(*e, "apk" | "aab"));
+        if only_mobile {
+            return format!("mobile-only ({} mobile assets)",
+                self.assets.iter().filter(|a| a.name.ends_with(".apk") || a.name.ends_with(".aab")).count());
+        }
+        let has_desktop = self.assets.iter().any(|a|
+            a.name.ends_with(".deb") || a.name.ends_with(".exe") || a.name.ends_with(".dmg")
+            || a.name.ends_with(".zip"));
+        if has_desktop {
+            return format!("no host installer (channel: {:?})", detect_release_channel(self));
+        }
+        format!("no host installer (extensions: {})",
+            exts.into_iter().collect::<Vec<_>>().join(", "))
+    }
+}
+
+/// CLI shim — keeps the old function signature for callers that don't
+/// care about channel filtering (default: Nightly only, matching legacy
+/// behaviour).
+pub async fn list_nightly_releases(count: u32) -> Result<Vec<Release>> {
+    list_releases_streaming(count, None, None, ChannelFilter::default(), |_| {}).await
+}
+
+/// Streaming variant: invokes `on_progress` after every paginated page
+/// with the cumulative-so-far list of `Release`s, so callers (the GUI)
+/// can render a partial list while later pages are still in flight.
+///
+/// `stop_at` is an optional lower-bound date (UTC). GitHub returns
+/// releases newest-first; once we encounter a release published BEFORE
+/// `stop_at`, we know we've covered everything from that date onward and
+/// stop fetching further pages — saves API calls and time when the user
+/// only needs releases since e.g. January 2025.
+pub async fn list_nightly_releases_streaming(
+    count: u32,
+    token: Option<&str>,
+    stop_at: Option<chrono::NaiveDate>,
+    filter: ChannelFilter,
+    on_progress: impl FnMut(Vec<Release>) + Send,
+) -> Result<Vec<Release>> {
+    list_releases_streaming(count, token, stop_at, filter, on_progress).await
+}
+
+async fn list_releases_streaming(
+    count: u32,
+    token: Option<&str>,
+    stop_at: Option<chrono::NaiveDate>,
+    filter: ChannelFilter,
+    mut on_progress: impl FnMut(Vec<Release>) + Send,
+) -> Result<Vec<Release>> {
+    let filter = filter.nonempty();
+    let mut builder = octocrab::OctocrabBuilder::new();
+    let chosen_token = token
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
+    if let Some(t) = chosen_token {
+        builder = builder.personal_token(t);
+    }
+    let octo = builder.build()?;
+
+    let target = count.max(1) as usize;
+    // 50 * 100 = 5000 raw releases — covers about 4.5 years of Brave Nightlies.
+    // Either the target count, the stop_at date, or this hard ceiling
+    // terminates the loop.
+    let max_pages: u32 = 50;
+    let mut out: Vec<Release> = Vec::new();
+    let mut crossed_stop = false;
+
+    // When stop_at is set, the user has implicitly asked for "everything
+    // back to this date" — so the count cap is moot. Use a much larger
+    // effective target so we don't stop short before crossing stop_at.
+    let effective_target = if stop_at.is_some() { 5000 } else { target };
+
+    for page_num in 1..=max_pages {
+        let page = octo.repos(OWNER, REPO).releases().list()
+            .per_page(100).page(page_num).send().await?;
+        if page.items.is_empty() { break; }
+
+        for r in page.items {
+            let published = r.published_at.map(|d| d.to_rfc3339()).unwrap_or_default();
+            if let Some(stop) = stop_at {
+                if let Some(date_str) = published.split('T').next() {
+                    if let Ok(d) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                        if d < stop { crossed_stop = true; }
+                    }
+                }
+            }
+
+            let assets: Vec<ReleaseAsset> = r.assets.into_iter().map(|a| ReleaseAsset {
+                name: a.name,
+                size: a.size as u64,
+                browser_download_url: a.browser_download_url.to_string(),
+            }).collect();
+            let mut candidate = Release {
+                tag: r.tag_name.clone(),
+                name: r.name.clone().unwrap_or_default(),
+                published_at: published,
+                prerelease: r.prerelease,
+                assets,
+                host_asset: None,
+            };
+            let channel = detect_release_channel(&candidate);
+            if !filter.allows(channel) { continue; }
+            candidate.host_asset = pick_asset_for(&candidate, channel).ok().map(|a| a.name.clone());
+            out.push(candidate);
+            if out.len() >= effective_target { break; }
+        }
+        on_progress(out.clone());
+        // Stop when we've reached our (uncapped if stop_at) target,
+        // OR crossed the stop_at floor — whichever happens first.
+        if out.len() >= effective_target { break; }
+        if crossed_stop { break; }
+    }
+    Ok(out)
+}
+
+pub async fn get_release(tag: &str) -> Result<Release> {
+    // Walk a generous window so we can resolve older tags too. Use an
+    // all-channels filter so install-by-tag works regardless of the GUI's
+    // current display preference.
+    let any = ChannelFilter { release: true, beta: true, nightly: true };
+    list_releases_streaming(500, None, None, any, |_| {}).await?
+        .into_iter()
+        .find(|r| r.tag == tag)
+        .ok_or_else(|| anyhow!("release tag not found: {tag}"))
+}
+
+/// Pick the best installer asset for the current platform, auto-detecting
+/// the release's channel.
+pub fn pick_asset(release: &Release) -> Result<&ReleaseAsset> {
+    let channel = detect_release_channel(release);
+    pick_asset_for(release, channel)
+}
+
+fn pick_asset_for(release: &Release, channel: Channel) -> Result<&ReleaseAsset> {
+    let names: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
+    if let Some(a) = pick_for_host(&release.assets, channel) { return Ok(a); }
+    Err(anyhow!(
+        "no suitable asset for this platform among {} assets; available: {:?}",
+        release.assets.len(), names
+    ))
+}
+
+/// True when filename contains the channel's marker, OR (for marker-free
+/// filenames like Brave's portable `.zip`s) carries no other channel's
+/// marker. This is safe because the caller already filtered the release
+/// at the channel level — a marker-free zip in a Nightly release IS a
+/// Nightly artifact.
+fn name_compatible(n: &str, channel: Channel) -> bool {
+    let l = n.to_lowercase();
+    if l.contains("origin") || l.contains("core") { return false; }
+    let has_nightly = l.contains("nightly");
+    let has_beta    = l.contains("beta");
+    let has_dev     = l.contains("dev");
+    match channel {
+        Channel::Nightly => has_nightly || (!has_beta && !has_dev),
+        Channel::Beta    => has_beta    || (!has_nightly && !has_dev),
+        Channel::Release => !has_nightly && !has_beta && !has_dev,
+    }
+}
+
+#[cfg(windows)]
+fn pick_for_host<'a>(assets: &'a [ReleaseAsset], channel: Channel) -> Option<&'a ReleaseAsset> {
+    let host_arch = std::env::consts::ARCH;
+    let want_arm = host_arch == "aarch64";
+
+    let exe_ok = |n: &str| -> bool {
+        n.ends_with(".exe") && name_compatible(n, channel)
+    };
+    let zip_clean = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        l.ends_with(".zip")
+            && !l.contains("pdb") && !l.contains("symbol") && !l.contains("debug")
+            && name_compatible(n, channel)
+    };
+    // Windows-only — explicitly require a Windows OS marker AND reject
+    // macOS/Linux markers, otherwise `brave-v…-darwin-x64.zip` would
+    // false-match on a bare "x64" substring.
+    let is_windows_zip = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        (l.contains("win32") || l.contains("win64") || l.contains("win-")
+         || l.contains("windows-") || l.contains("-win"))
+            && !l.contains("darwin") && !l.contains("linux")
+            && !l.contains("mac") && !l.contains("osx")
+    };
+
+    let zip_x64 = |n: &str| -> bool {
+        zip_clean(n) && is_windows_zip(n)
+            && (n.contains("x64") || n.contains("amd64"))
+            && !n.to_lowercase().contains("arm")
+    };
+    let zip_arm = |n: &str| -> bool {
+        zip_clean(n) && is_windows_zip(n)
+            && (n.contains("arm64") || n.contains("aarch64"))
+    };
+    let zip_any = |n: &str| -> bool { zip_clean(n) && is_windows_zip(n) };
+
+    let silent_standalone_x64 = |n: &str| -> bool {
+        exe_ok(n) && n.contains("Standalone") && n.contains("Silent")
+            && !n.to_lowercase().contains("arm")
+    };
+    let silent_standalone_arm = |n: &str| -> bool {
+        exe_ok(n) && n.contains("Standalone") && n.contains("Silent")
+            && n.to_lowercase().contains("arm")
+    };
+    let standalone_x64 = |n: &str| -> bool {
+        exe_ok(n) && n.contains("Standalone")
+            && !n.to_lowercase().contains("arm")
+    };
+    let standalone_arm = |n: &str| -> bool {
+        exe_ok(n) && n.contains("Standalone")
+            && n.to_lowercase().contains("arm")
+    };
+
+    let order: [&dyn Fn(&str) -> bool; 5] = if want_arm
+        { [&zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm, &zip_x64] }
+        else { [&zip_x64, &zip_any, &silent_standalone_x64, &standalone_x64, &zip_arm] };
+    for matcher in order {
+        if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn pick_for_host<'a>(assets: &'a [ReleaseAsset], channel: Channel) -> Option<&'a ReleaseAsset> {
+    let host_arch = std::env::consts::ARCH;
+    let want_arm = host_arch == "aarch64";
+
+    let is_macos_zip = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        (l.contains("darwin") || l.contains("macos") || l.contains("osx")
+         || l.contains("mac-"))
+            && !l.contains("linux") && !l.contains("win32") && !l.contains("win64")
+    };
+    // Reject `*-symbols.zip` and other debug-info bundles. Without this,
+    // alphabetical asset order puts `…-arm64-symbols.zip` before the real
+    // `…-arm64.zip` and the picker grabs the symbols archive.
+    let zip_clean = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        n.ends_with(".zip") && name_compatible(n, channel) && is_macos_zip(n)
+            && !l.contains("symbol") && !l.contains("pdb") && !l.contains("debug")
+    };
+    let zip_arm = |n: &str| -> bool {
+        zip_clean(n) && (n.contains("arm64") || n.contains("aarch64"))
+    };
+    let zip_x64 = |n: &str| -> bool {
+        zip_clean(n) && !n.contains("arm") && !n.contains("aarch64")
+    };
+    let zip_any = |n: &str| -> bool { zip_clean(n) };
+    let dmg_arm = |n: &str| -> bool {
+        n.ends_with(".dmg") && name_compatible(n, channel)
+            && (n.contains("arm64") || n.contains("aarch64"))
+    };
+    let dmg_x64 = |n: &str| -> bool {
+        n.ends_with(".dmg") && name_compatible(n, channel)
+            && (n.contains("x64") || n.contains("x86_64"))
+    };
+    let dmg_uni = |n: &str| -> bool {
+        n.ends_with(".dmg") && name_compatible(n, channel)
+            && n.to_lowercase().contains("universal")
+    };
+    let dmg_any = |n: &str| -> bool {
+        n.ends_with(".dmg") && name_compatible(n, channel)
+    };
+
+    let order: [&dyn Fn(&str) -> bool; 7] = if want_arm
+        { [&zip_arm, &zip_any, &dmg_arm, &dmg_uni, &dmg_any, &dmg_x64, &zip_x64] }
+        else { [&zip_x64, &zip_any, &dmg_x64, &dmg_uni, &dmg_any, &dmg_arm, &zip_arm] };
+    for matcher in order {
+        if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
+    }
+    None
+}
+
+/// One commit returned by GitHub's `compare` endpoint.
+#[derive(Debug, Clone)]
+pub struct CommitRow {
+    pub sha: String,
+    pub short: String,
+    pub subject: String,
+    pub author:  String,
+    pub date:    String,
+    pub html_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompareResult {
+    pub base:    String,
+    pub head:    String,
+    pub total:   u32,
+    pub commits: Vec<CommitRow>,
+    /// True when GitHub's `compare` capped at 250 commits but more exist.
+    pub truncated: bool,
+}
+
+/// Fetch the commit list between two refs in `brave/brave-core` via the
+/// REST `compare` endpoint. Token-aware to dodge anonymous rate limits.
+pub async fn compare_commits(base: &str, head: &str, token: Option<&str>) -> Result<CompareResult> {
+    let url = format!("https://api.github.com/repos/{OWNER}/brave-core/compare/{base}...{head}");
+    let mut req = reqwest::Client::builder()
+        .user_agent("brave-regress")
+        .build()?
+        .get(&url)
+        .header("Accept", "application/vnd.github+json");
+    let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
+    if let Some(t) = chosen {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("github compare {base}...{head}: HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await?;
+    let total = body.get("total_commits").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let arr = body.get("commits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let truncated = (total as usize) > arr.len();
+    let commits: Vec<CommitRow> = arr.into_iter().filter_map(|c| {
+        let sha = c.get("sha")?.as_str()?.to_string();
+        let html_url = c.get("html_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let commit_obj = c.get("commit")?;
+        let message = commit_obj.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let subject = message.lines().next().unwrap_or("").to_string();
+        let author_obj = commit_obj.get("author");
+        let author = author_obj.and_then(|a| a.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let date = author_obj.and_then(|a| a.get("date")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let short: String = sha.chars().take(7).collect();
+        Some(CommitRow { sha, short, subject, author, date, html_url })
+    }).collect();
+    Ok(CompareResult { base: base.into(), head: head.into(), total, commits, truncated })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn pick_for_host<'a>(assets: &'a [ReleaseAsset], channel: Channel) -> Option<&'a ReleaseAsset> {
+    let host_arch = std::env::consts::ARCH;
+    let want_arm = host_arch == "aarch64";
+
+    // Linux .zip — Brave ships portable Linux zips with no channel marker
+    // in the filename; channel comes from the release. Require linux marker
+    // AND reject darwin/win markers so a Brave macOS / Windows zip can't
+    // false-match this picker on bare arch tokens.
+    let is_linux_zip = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        (l.contains("linux") || l.contains("ubuntu") || l.contains("debian"))
+            && !l.contains("darwin") && !l.contains("mac")
+            && !l.contains("win32") && !l.contains("win64")
+    };
+    // Reject `*-symbols.zip` / debug bundles for the same reason as the
+    // Windows / macOS pickers — alphabetical order can put them ahead of
+    // the real archive.
+    let zip_clean = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        n.ends_with(".zip") && name_compatible(n, channel) && is_linux_zip(n)
+            && !l.contains("symbol") && !l.contains("pdb") && !l.contains("debug")
+    };
+    let zip_x64 = |n: &str| -> bool {
+        zip_clean(n) && !n.contains("arm") && !n.contains("aarch64")
+    };
+    let zip_arm = |n: &str| -> bool {
+        zip_clean(n) && (n.contains("arm64") || n.contains("aarch64"))
+    };
+    let zip_any = |n: &str| -> bool { zip_clean(n) };
+    let deb_amd64 = |n: &str| -> bool {
+        n.ends_with(".deb") && n.contains("amd64") && name_compatible(n, channel)
+    };
+    let deb_arm64 = |n: &str| -> bool {
+        n.ends_with(".deb") && (n.contains("arm64") || n.contains("aarch64"))
+            && name_compatible(n, channel)
+    };
+
+    let order: [&dyn Fn(&str) -> bool; 5] = if want_arm
+        { [&zip_arm, &zip_any, &deb_arm64, &deb_amd64, &zip_x64] }
+        else { [&zip_x64, &zip_any, &deb_amd64, &deb_arm64, &zip_arm] };
+    for matcher in order {
+        if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
+    }
+    None
+}

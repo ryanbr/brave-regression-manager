@@ -1,0 +1,122 @@
+[package]
+name    = "brave-regress"
+version = "0.1.0"
+edition = "2021"
+description = "Brave Regression Manager — detect regressions between Brave versions and between adblock list configurations"
+
+[[bin]]
+name = "brave-regress"
+path = "src/main.rs"
+
+[dependencies]
+# Tokio with the specific features we actually use: multi-thread runtime
+# for the GUI's `Handle::spawn` worker tasks, fs/io-util/process for our
+# downloads + brave-launching, time for retry backoff. Dropped the rest of
+# `full` (signal, net, parking_lot integration, sync primitives we don't use).
+tokio       = { version = "1", default-features = false, features = [
+    "rt-multi-thread", "macros", "time", "fs", "io-util", "process", "sync",
+] }
+anyhow      = "1"
+thiserror   = "1"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+toml        = "0.8"
+clap        = { version = "4", features = ["derive"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+reqwest     = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+octocrab    = "0.39"
+futures-util = "0.3"
+
+dirs        = "5"
+walkdir     = "2"
+sha2        = "0.10"
+hex         = "0.4"
+semver      = "1"
+regex       = "1"
+aho-corasick = "1"
+memmap2     = "0.9"
+notify      = "6"
+imara-diff  = "0.1"
+
+# archive extraction
+zip         = "0.6"
+flate2      = "1"
+tar         = "0.4"
+xz2         = "0.1"
+zstd        = "0.13"  # newer .deb data.tar.zst payloads
+ar          = "0.9"   # .deb (linux)
+
+# storage
+rusqlite    = { version = "0.31", features = ["bundled"] }
+
+# CDP / browser driver — re-enable once we wire the runner; current 0.5 has a
+# broken transitive (rmp-serde) on recent rustc, and 0.6+ tightens its API.
+# chromiumoxide = { version = "0.5", features = ["tokio-runtime"], default-features = false }
+
+# adblock engine (offline path) — re-enable when wiring offline checker.
+# adblock     = "0.8"
+
+# GUI
+# Persistence feature deliberately omitted — eframe's saved window state
+# was overriding our default inner_size with stale dimensions from prior
+# runs. We don't use eframe's app-state persistence for anything else.
+eframe      = { version = "0.27", default-features = false, features = ["default_fonts", "glow"] }
+egui        = "0.27"
+# Only the date picker — `all_loaders` would pull in `image` + `svg` + `webp`
+# decoders we don't use, and they add ~1 MB of compiled code each.
+egui_extras = { version = "0.27", default-features = false, features = ["datepicker"] }
+# Clipboard read for the right-click "Paste" action — egui's set-clipboard
+# works via ctx.copy_text() but reads happen at the OS-event layer, which
+# only fires for native Ctrl+V. arboard gives us read access directly.
+arboard     = "3"
+# Native folder-picker for the per-version "Browse to custom profile dir"
+# button. xdg-portal feature avoids a GTK system-dep build pull-in on
+# Linux; on Windows / macOS it uses the platform's native dialog.
+rfd         = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
+
+# misc
+chrono      = { version = "0.4", features = ["serde"] }
+uuid        = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[profile.release]
+# Optimize aggressively for binary size. With this combination we get:
+#   - `lto = "fat"`         cross-crate inlining + dead-code elimination
+#   - `codegen-units = 1`   no parallel codegen → better LTO opportunity
+#   - `panic = "abort"`     drops unwinding tables (~200-400 KB)
+#   - `opt-level = "z"`     LLVM size-prioritised passes (some perf cost,
+#                           negligible for a GUI/IO-bound app)
+#   - `strip = "symbols"`   removes debug info entirely
+# Build is slower (~50-90 s clean cross-build to Windows GNU); the binary
+# is meaningfully smaller. Drop to `lto = "thin"` + `opt-level = 3` if you
+# need to iterate.
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+opt-level     = "z"
+strip         = "symbols"
+
+# A separate release-but-fast profile for iteration, invoked with
+# `cargo build --release --profile release-quick`. Skips the heavy LTO
+# but still optimised enough for real testing.
+[profile.release-quick]
+inherits      = "release"
+lto           = "thin"
+opt-level     = 3
+codegen-units = 16
+panic         = "unwind"   # easier debugging when something blows up
+
+# Faster incremental dev builds — opt-level=1 on dependencies (so they're
+# not slow) and 0 on our crate (so our changes link instantly).
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 1
