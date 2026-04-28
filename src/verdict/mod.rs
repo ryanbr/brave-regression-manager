@@ -59,6 +59,11 @@ fn open() -> Result<Connection> {
             tag TEXT PRIMARY KEY,
             path TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS notes (
+            tag        TEXT PRIMARY KEY,
+            body       TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
     "#)?;
     Ok(conn)
 }
@@ -113,6 +118,30 @@ pub fn set_user_data_dir(tag: &str, path: &str) -> Result<()> {
             "INSERT INTO user_data_dir(tag, path) VALUES (?1, ?2)
              ON CONFLICT(tag) DO UPDATE SET path = excluded.path",
             params![tag, path])?;
+    }
+    Ok(())
+}
+
+/// Read the freeform note attached to a tag. Empty string means none.
+pub fn note(tag: &str) -> String {
+    let conn = match open() { Ok(c) => c, Err(_) => return String::new() };
+    conn.query_row(
+        "SELECT body FROM notes WHERE tag=?1",
+        params![tag], |r| r.get::<_, String>(0)
+    ).unwrap_or_default()
+}
+
+/// Persist a freeform note for a tag. Empty / whitespace clears it.
+pub fn set_note(tag: &str, body: &str) -> Result<()> {
+    let conn = open()?;
+    if body.trim().is_empty() {
+        conn.execute("DELETE FROM notes WHERE tag=?1", params![tag])?;
+    } else {
+        let now = Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO notes(tag, body, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(tag) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at",
+            params![tag, body, now])?;
     }
     Ok(())
 }

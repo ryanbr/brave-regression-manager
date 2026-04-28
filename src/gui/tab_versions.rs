@@ -614,6 +614,26 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     _         => ("?",       Color32::from_rgb(150, 150, 150)),
                 };
                 ui.colored_label(chan_color, format!("[{chan_label}]"));
+
+                // Note affordance: small clickable label that opens an
+                // edit popup. `+` (dim) when no note exists; `note` (blue)
+                // with the body as tooltip when one does.
+                let cur_note = verdict::note(&r.tag);
+                let (note_label, note_color, hover) = if cur_note.is_empty() {
+                    ("+", Color32::from_gray(110), "Add a note for this tag".to_string())
+                } else {
+                    ("note", Color32::from_rgb(140, 180, 220), cur_note.clone())
+                };
+                if ui.add(egui::Label::new(
+                        RichText::new(note_label).monospace().color(note_color))
+                        .sense(egui::Sense::click()))
+                    .on_hover_text(hover)
+                    .clicked()
+                {
+                    state.editing_note_tag = Some(r.tag.clone());
+                    state.editing_note_buf = cur_note;
+                }
+
                 let installed = versions::is_installed(&r.tag);
                 let busy = installing_now.as_deref() == Some(r.tag.as_str());
 
@@ -698,6 +718,58 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             });
         }
     });
+
+    render_note_editor(ui, state);
+}
+
+/// Floating popup for editing the freeform note attached to a tag.
+/// Opened by clicking the `+` / `note` cell in the Available list. Stays
+/// modal-feeling but is just an `egui::Window` — Save persists to sqlite,
+/// Cancel/Escape/× close without saving.
+fn render_note_editor(ui: &mut Ui, state: &mut AppState) {
+    let Some(tag) = state.editing_note_tag.clone() else { return };
+    let mut open = true;
+    let mut close_after = false;
+    egui::Window::new(format!("Note · {tag}"))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(420.0)
+        .open(&mut open)
+        .show(ui.ctx(), |ui|
+    {
+        ui.add(egui::TextEdit::multiline(&mut state.editing_note_buf)
+            .desired_rows(6).desired_width(400.0)
+            .hint_text("Free-form notes for this tag — saved when you click Save."));
+        ui.horizontal(|ui| {
+            if ui.button("Save").clicked() {
+                let trimmed = state.editing_note_buf.trim().to_string();
+                if let Err(e) = verdict::set_note(&tag, &trimmed) {
+                    state.status_msg = format!("save note failed: {e}");
+                } else {
+                    crate::console::info(&state.console, "note",
+                        if trimmed.is_empty() {
+                            format!("cleared note for {tag}")
+                        } else {
+                            format!("saved note for {tag}")
+                        });
+                }
+                close_after = true;
+            }
+            if ui.button("Cancel").clicked() { close_after = true; }
+            if !verdict::note(&tag).is_empty()
+                && ui.button("Delete").clicked()
+            {
+                let _ = verdict::set_note(&tag, "");
+                crate::console::info(&state.console, "note",
+                    format!("cleared note for {tag}"));
+                close_after = true;
+            }
+        });
+    });
+    if !open || close_after {
+        state.editing_note_tag = None;
+        state.editing_note_buf.clear();
+    }
 }
 
 /// Renders the "Commits in range" panel under the Installed list. Shows

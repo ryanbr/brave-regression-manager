@@ -162,6 +162,11 @@ pub struct AppState {
     pub compare_result:  Option<crate::versions::github::CompareResult>,
     pub compare_error:   Option<String>,
 
+    /// Per-tag freeform-note editor. `Some(tag)` while the popup is open;
+    /// the buffer holds the in-progress edit so it survives repaints.
+    pub editing_note_tag: Option<String>,
+    pub editing_note_buf: String,
+
     pub status_msg: String,
 
     pub rt:      Handle,
@@ -215,6 +220,8 @@ impl AppState {
             compare_loading: false,
             compare_result: None,
             compare_error: None,
+            editing_note_tag: None,
+            editing_note_buf: String::new(),
             status_msg: String::new(),
             rt,
             slots: AsyncSlots::default(),
