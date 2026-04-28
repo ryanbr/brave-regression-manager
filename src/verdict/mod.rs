@@ -6,19 +6,53 @@ use serde::{Deserialize, Serialize};
 use crate::paths;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Verdict { Good, Bad, Unknown }
+pub enum Verdict {
+    /// Tested and works.
+    Good,
+    /// Tested and broken — the regression target.
+    Bad,
+    /// Works but has visible bugs / glitches that aren't full breakage.
+    Buggy,
+    /// Tested briefly but the verdict isn't clear-cut yet.
+    Unsure,
+    /// Installed but not tested at all.
+    Untested,
+    /// No verdict ("Clear" in the GUI).
+    Unknown,
+}
 
 impl Verdict {
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s.to_ascii_lowercase().as_str() {
-            "good" | "g" => Self::Good,
-            "bad"  | "b" => Self::Bad,
-            "clear" | "unknown" | "?" | "" => Self::Unknown,
-            other => return Err(anyhow!("verdict must be good|bad|clear, got {other}")),
+            "good"     | "g" => Self::Good,
+            "bad"      | "b" => Self::Bad,
+            "buggy"    | "u" => Self::Buggy,
+            "unsure"   | "?" => Self::Unsure,
+            "untested" | "n" => Self::Untested,
+            "clear" | "unknown" | "" => Self::Unknown,
+            other => return Err(anyhow!(
+                "verdict must be good|bad|buggy|unsure|untested|clear, got {other}")),
         })
     }
     pub fn as_str(&self) -> &'static str {
-        match self { Self::Good => "good", Self::Bad => "bad", Self::Unknown => "unknown" }
+        match self {
+            Self::Good     => "good",
+            Self::Bad      => "bad",
+            Self::Buggy    => "buggy",
+            Self::Unsure   => "unsure",
+            Self::Untested => "untested",
+            Self::Unknown  => "unknown",
+        }
+    }
+    fn from_db(s: &str) -> Self {
+        match s {
+            "good"     => Self::Good,
+            "bad"      => Self::Bad,
+            "buggy"    => Self::Buggy,
+            "unsure"   => Self::Unsure,
+            "untested" => Self::Untested,
+            _          => Self::Unknown,
+        }
     }
 }
 
@@ -190,9 +224,7 @@ pub fn list_version_verdicts() -> Result<Vec<VersionVerdict>> {
         let v: String = r.get(1)?;
         Ok(VersionVerdict {
             tag: r.get(0)?,
-            verdict: match v.as_str() {
-                "good" => Verdict::Good, "bad" => Verdict::Bad, _ => Verdict::Unknown,
-            },
+            verdict: Verdict::from_db(&v),
             note: r.get(2)?,
             marked_at: DateTime::from_timestamp(r.get::<_, i64>(3)?, 0).unwrap_or_else(Utc::now),
             related_url: r.get(4)?,
@@ -206,9 +238,5 @@ pub fn version_verdict(tag: &str) -> Result<Verdict> {
     let v: Option<String> = conn.query_row(
         "SELECT verdict FROM version_verdict WHERE tag=?1",
         params![tag], |r| r.get(0)).ok();
-    Ok(match v.as_deref() {
-        Some("good") => Verdict::Good,
-        Some("bad")  => Verdict::Bad,
-        _            => Verdict::Unknown,
-    })
+    Ok(v.as_deref().map(Verdict::from_db).unwrap_or(Verdict::Unknown))
 }

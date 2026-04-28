@@ -341,7 +341,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         match verdict::version_verdict(tag).unwrap_or(Verdict::Unknown) {
             Verdict::Good => goods.push((i, tag.clone())),
             Verdict::Bad  => bads.push((i, tag.clone())),
-            Verdict::Unknown => {}
+            // BUGGY / UNSURE / UNTESTED / Unknown don't anchor a bracket.
+            // Only firm GOOD ↔ BAD pairs trigger the compare panel.
+            _ => {}
         }
     }
     let mut bracket: Option<(String, String, String, String)> = None; // (older, newer, good, bad)
@@ -375,11 +377,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         for v in &installed {
             ui.horizontal(|ui| {
                 let verdict = verdict::version_verdict(&v.tag).unwrap_or(Verdict::Unknown);
-                let dot_color = match verdict {
-                    Verdict::Good    => Color32::from_rgb(60, 200, 90),
-                    Verdict::Bad     => Color32::from_rgb(220, 70, 70),
-                    Verdict::Unknown => Color32::from_rgb(150, 150, 150),
-                };
+                let dot_color = verdict_color(verdict);
                 // Use a basic asterisk-style bullet that egui's default font
                 // definitely supports — `●` (U+25CF) was rendering as a tofu square.
                 ui.colored_label(dot_color, "•");
@@ -485,22 +483,31 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 let current_verdict = verdict;
                 let mut new_verdict = current_verdict;
                 egui::ComboBox::from_id_source(format!("verdict-{}", v.tag))
-                    .width(80.0)
-                    .selected_text(match current_verdict {
-                        Verdict::Good    => "GOOD",
-                        Verdict::Bad     => "BAD",
-                        Verdict::Unknown => "Clear",
-                    })
+                    .width(108.0)
+                    .selected_text(verdict_label(current_verdict))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut new_verdict, Verdict::Good,    "GOOD");
-                        ui.selectable_value(&mut new_verdict, Verdict::Bad,     "BAD");
-                        ui.selectable_value(&mut new_verdict, Verdict::Unknown, "Clear");
+                        for v in [
+                            Verdict::Good,
+                            Verdict::Bad,
+                            Verdict::Buggy,
+                            Verdict::Unsure,
+                            Verdict::Untested,
+                            Verdict::Unknown,
+                        ] {
+                            // Color each option's label so the dropdown
+                            // mirrors the row's dot-colour palette.
+                            let txt = RichText::new(verdict_label(v)).color(verdict_color(v));
+                            ui.selectable_value(&mut new_verdict, v, txt);
+                        }
                     });
                 if new_verdict != current_verdict {
                     let s = match new_verdict {
-                        Verdict::Good    => "good",
-                        Verdict::Bad     => "bad",
-                        Verdict::Unknown => "clear",
+                        Verdict::Good     => "good",
+                        Verdict::Bad      => "bad",
+                        Verdict::Buggy    => "buggy",
+                        Verdict::Unsure   => "unsure",
+                        Verdict::Untested => "untested",
+                        Verdict::Unknown  => "clear",
                     };
                     let _ = verdict::mark("version", &v.tag, s, None);
                 }
@@ -954,6 +961,32 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
             .map_err(|e| e.to_string());
         *slot.lock().unwrap() = Some(result);
     });
+}
+
+/// Display label for a verdict — appears in the row dot, the row's tag
+/// text, and the per-row combo dropdown.
+fn verdict_label(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Good     => "GOOD",
+        Verdict::Bad      => "BAD",
+        Verdict::Buggy    => "BUGGY",
+        Verdict::Unsure   => "UNSURE",
+        Verdict::Untested => "UNTESTED",
+        Verdict::Unknown  => "Clear",
+    }
+}
+
+/// Display colour for a verdict. One source of truth — both the row dot
+/// and the dropdown's per-option label use this so they stay in sync.
+fn verdict_color(v: Verdict) -> Color32 {
+    match v {
+        Verdict::Good     => Color32::from_rgb( 60, 200,  90),  // green
+        Verdict::Bad      => Color32::from_rgb(220,  70,  70),  // red
+        Verdict::Buggy    => Color32::from_rgb(220, 130,  60),  // orange
+        Verdict::Unsure   => Color32::from_rgb(220, 200,  60),  // yellow
+        Verdict::Untested => Color32::from_rgb(130, 160, 200),  // blue-grey
+        Verdict::Unknown  => Color32::from_rgb(150, 150, 150),  // neutral grey
+    }
 }
 
 fn short_date(iso: &str) -> String {
