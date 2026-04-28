@@ -125,6 +125,17 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
         cmd.arg("--disable-gpu");
     }
 
+    // macOS: Chromium tries to read/create a `Brave Safe Storage` key in
+    // the login keychain on every launch (used to encrypt cookies / saved
+    // passwords). For a regression-testing harness the prompt is just
+    // friction — we don't need encrypted credential persistence. `basic`
+    // falls back to an obfuscation-only store so Brave never touches the
+    // keychain.
+    #[cfg(target_os = "macos")]
+    {
+        cmd.arg("--password-store=basic");
+    }
+
     // Brave / Chromium logging flags. `--enable-logging=stderr` is the
     // critical bit — without it, LOG output goes to <profile>/chrome_debug.log
     // and never reaches our pipe, even if --v=N is set.
