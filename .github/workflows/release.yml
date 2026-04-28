@@ -139,6 +139,14 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      # Apple Silicon refuses to run any arm64 Mach-O without a code
+      # signature — kernel SIGKILLs the process on exec, surfaced as
+      # "zsh: killed". Ad-hoc sign (the `-` identity) is enough; no
+      # Apple Developer ID needed for users to launch the binary.
+      - name: Ad-hoc sign macOS binary
+        if: runner.os == 'macOS'
+        run: codesign --force --deep --sign - "target/${{ matrix.target }}/release/brave-regress"
+
       - name: Stage archive (Unix)
         if: runner.os != 'Windows'
         shell: bash
