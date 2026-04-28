@@ -483,7 +483,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 let current_verdict = verdict;
                 let mut new_verdict = current_verdict;
                 egui::ComboBox::from_id_source(format!("verdict-{}", v.tag))
-                    .width(108.0)
+                    .width(82.0)
                     .selected_text(verdict_label(current_verdict))
                     .show_ui(ui, |ui| {
                         for v in [
@@ -964,14 +964,15 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
 }
 
 /// Display label for a verdict — appears in the row dot, the row's tag
-/// text, and the per-row combo dropdown.
+/// text, and the per-row combo dropdown. Kept short so the combo doesn't
+/// push the Open / Del buttons off the row.
 fn verdict_label(v: Verdict) -> &'static str {
     match v {
         Verdict::Good     => "GOOD",
         Verdict::Bad      => "BAD",
         Verdict::Buggy    => "BUGGY",
         Verdict::Unsure   => "UNSURE",
-        Verdict::Untested => "UNTESTED",
+        Verdict::Untested => "NEW",   // short for "untested / not yet run"
         Verdict::Unknown  => "Clear",
     }
 }
