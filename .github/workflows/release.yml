@@ -26,14 +26,6 @@ on:
 permissions:
   contents: write   # required for softprops/action-gh-release + commit/tag push
 
-# Opt every JavaScript action in this workflow into Node.js 24. Node 20 is
-# being phased out (forced to 24 on 2026-06-02, removed 2026-09-16). The
-# actions themselves still publish Node-20 bundles at v4 / v2, but this
-# env var tells the runner to use its bundled Node 24 instead.
-# Remove once Node 24 is the runner default.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   # On manual runs, bump the workspace version, commit, tag, push.
   # Pushes from GITHUB_TOKEN don't trigger downstream workflow runs, so
@@ -47,9 +39,10 @@ jobs:
       tag: ${{ steps.do.outputs.tag }}
       sha: ${{ steps.do.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0   # need full history to push back
+          persist-credentials: true
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -111,7 +104,7 @@ jobs:
     steps:
       # On manual runs, check out the freshly-bumped commit; otherwise
       # the tag we were triggered by.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.bump.outputs.sha || github.ref }}
 
@@ -144,13 +137,42 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: '11.0'
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      # Apple Silicon refuses to run any arm64 Mach-O without a code
-      # signature — kernel SIGKILLs the process on exec, surfaced as
-      # "zsh: killed". Ad-hoc sign (the `-` identity) is enough; no
-      # Apple Developer ID needed for users to launch the binary.
-      - name: Ad-hoc sign macOS binary
+      # Wrap the binary in a minimal .app bundle. macOS Gatekeeper has
+      # progressively tightened around bare CLI Mach-O downloads — on
+      # macOS 14+ AppleSystemPolicy refuses to exec one even after
+      # `xattr -d com.apple.quarantine`. A .app bundle gets the standard
+      # right-click → Open / "Allow Anyway" UX instead.
+      - name: Build macOS .app bundle
         if: runner.os == 'macOS'
-        run: codesign --force --deep --sign - "target/${{ matrix.target }}/release/brave-regress"
+        run: |
+          set -euo pipefail
+          app="target/${{ matrix.target }}/release/Brave Regression Manager.app"
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/brave-regress" "$app/Contents/MacOS/brave-regress"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>            <string>brave-regress</string>
+            <key>CFBundleIdentifier</key>            <string>dev.ryanbr.brave-regression-manager</string>
+            <key>CFBundleName</key>                  <string>Brave Regression Manager</string>
+            <key>CFBundleDisplayName</key>           <string>Brave Regression Manager</string>
+            <key>CFBundlePackageType</key>           <string>APPL</string>
+            <key>CFBundleShortVersionString</key>    <string>0.1.0</string>
+            <key>CFBundleVersion</key>               <string>0.1.0</string>
+            <key>LSMinimumSystemVersion</key>        <string>11.0</string>
+            <key>NSHighResolutionCapable</key>       <true/>
+            <key>NSPrincipalClass</key>              <string>NSApplication</string>
+            <key>NSSupportsAutomaticGraphicsSwitching</key> <true/>
+          </dict>
+          </plist>
+          PLIST
+          codesign --force --deep --sign - "$app"
+          codesign -dv "$app" 2>&1
+          ls -la "$app/Contents"
 
       - name: Stage archive (Unix)
         if: runner.os != 'Windows'
@@ -186,7 +208,7 @@ jobs:
       # grabbing binaries from a failed/partial run without checking the
       # Releases page.
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: brave-regress-${{ matrix.target }}
           path: |
