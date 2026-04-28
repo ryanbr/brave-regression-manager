@@ -154,7 +154,7 @@ brave-regress
 
 ## License
 
-MIT (or your preferred — drop a `LICENSE` file in to make it explicit).
+[MIT](LICENSE) © 2026 ryanbr.
 
 ## Acknowledgements
 

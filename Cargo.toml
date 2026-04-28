@@ -3,6 +3,8 @@ name    = "brave-regress"
 version = "0.1.0"
 edition = "2021"
 description = "Brave Regression Manager — detect regressions between Brave versions and between adblock list configurations"
+license = "MIT"
+repository = "https://github.com/ryanbr/brave-regression-manager"
 
 [[bin]]
 name = "brave-regress"
