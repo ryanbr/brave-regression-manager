@@ -95,8 +95,22 @@ jobs:
           Compress-Archive -Path $dir -DestinationPath (Join-Path $stage "$name.zip") -Force
           Get-ChildItem $stage
 
-      # Skip uploads on manual `workflow_dispatch` runs — those are for
-      # validating the matrix without cutting a release.
+      # Always attach the archives to the workflow run so they're
+      # downloadable from the Actions UI — including on manual
+      # `workflow_dispatch` runs that don't publish a Release.
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: brave-regress-${{ matrix.target }}
+          path: |
+            staging/*.tar.gz
+            staging/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      # On `v*` tag pushes only, also publish the archive to the GitHub
+      # Release for that tag. softprops/action-gh-release auto-creates the
+      # release on first upload and appends to it from the rest.
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
