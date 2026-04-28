@@ -108,6 +108,18 @@ jobs:
         with:
           ref: ${{ needs.bump.outputs.sha || github.ref }}
 
+      # Resolve the release tag once so every later step (archive name,
+      # workflow-artifact name, GitHub Release upload) uses the same value.
+      # `needs.bump.outputs.tag` is populated on workflow_dispatch runs;
+      # `github.ref_name` is the pushed tag on push-tag runs.
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          tag="${{ needs.bump.outputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release tag = $tag"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -181,7 +193,7 @@ jobs:
           set -euo pipefail
           stage=staging
           mkdir -p "$stage"
-          name="brave-regress-${{ matrix.target }}"
+          name="brave-regress-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$stage/$name"
           cp "target/${{ matrix.target }}/release/brave-regress${{ matrix.ext }}" "$stage/$name/"
           cp README.md "$stage/$name/" || true
@@ -195,7 +207,7 @@ jobs:
         run: |
           $stage = "staging"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          $name  = "brave-regress-${{ matrix.target }}"
+          $name  = "brave-regress-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
           $dir   = Join-Path $stage $name
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/brave-regress.exe" $dir
@@ -210,19 +222,20 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v5
         with:
-          name: brave-regress-${{ matrix.target }}
+          name: brave-regress-${{ steps.tag.outputs.tag }}-${{ matrix.target }}
           path: |
             staging/*.tar.gz
             staging/*.zip
           if-no-files-found: error
           retention-days: 14
 
-      # Publish to the GitHub Release. Tag is the bumped tag (manual run)
-      # or the pushed tag (tag-push run).
+      # Publish to the GitHub Release. Tag was resolved earlier; reuse it
+      # so the version embedded in the archive name matches the Release
+      # it gets attached to.
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.bump.outputs.tag || github.ref_name }}
+          tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             staging/*.tar.gz
             staging/*.zip
