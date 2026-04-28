@@ -1,28 +1,86 @@
 name: Release
 
-# Triggers a build of every supported target whenever a `v*` tag is pushed.
-# Each job uploads its artifact to a GitHub Release for that tag; the
-# release is created on the first upload and appended to by subsequent
-# uploads.
+# Two ways to cut a release:
+#
+#   • Push a `v*` tag — the existing flow. The matrix runs and publishes
+#     binaries to the GitHub Release for that tag.
+#
+#   • Click "Run workflow" → pick `patch` / `minor` / `major`. The bump
+#     job edits Cargo.toml/Cargo.lock, commits, tags, and pushes; then
+#     the matrix builds the new tag and publishes.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag for the release (created if it doesn''t exist).'
-        required: true
-        default: v0.1.0-dev
+      bump:
+        description: 'Version bump (patch / minor / major)'
+        type: choice
+        options: [patch, minor, major]
+        default: patch
       prerelease:
-        description: 'Mark this Release as a pre-release.'
+        description: 'Mark Release as pre-release'
         type: boolean
-        default: true
+        default: false
 
 permissions:
-  contents: write   # required for softprops/action-gh-release
+  contents: write   # required for softprops/action-gh-release + commit/tag push
 
 jobs:
+  # On manual runs, bump the workspace version, commit, tag, push.
+  # Pushes from GITHUB_TOKEN don't trigger downstream workflow runs, so
+  # there's no double-fire — the build job below uses the bumped commit
+  # within this same run.
+  bump:
+    name: Bump + tag
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.do.outputs.tag }}
+      sha: ${{ steps.do.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history to push back
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - id: do
+        name: Bump, commit, tag, push
+        run: |
+          set -euo pipefail
+          # `cargo set-version` updates both Cargo.toml and Cargo.lock.
+          cargo set-version --bump '${{ inputs.bump }}'
+          new=$(cargo metadata --no-deps --format-version 1 \
+                | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['version'])")
+          tag="v$new"
+          echo "Bumped to $tag"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Release $tag [skip ci]"
+          git tag "$tag"
+          git push origin HEAD --tags
+          {
+            echo "tag=$tag"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
   build:
+    needs: [bump]
+    # Run when triggered by a tag push (bump skipped) OR after a successful
+    # bump on a manual run.
+    if: |
+      always()
+      && (needs.bump.result == 'success' || needs.bump.result == 'skipped')
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -43,7 +101,11 @@ jobs:
             archive: tar.gz
 
     steps:
+      # On manual runs, check out the freshly-bumped commit; otherwise
+      # the tag we were triggered by.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.sha || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -69,9 +131,6 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      # Stage a single archive per target with a predictable name. The
-      # binary is `brave-regress` (the crate name); the archive name embeds
-      # the target triple so all four artifacts coexist on one release.
       - name: Stage archive (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -102,9 +161,9 @@ jobs:
           Compress-Archive -Path $dir -DestinationPath (Join-Path $stage "$name.zip") -Force
           Get-ChildItem $stage
 
-      # Always attach the archives to the workflow run so they're
-      # downloadable from the Actions UI — including on manual
-      # `workflow_dispatch` runs that don't publish a Release.
+      # Always attach the archives to the workflow run too — useful for
+      # grabbing binaries from a failed/partial run without checking the
+      # Releases page.
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -115,15 +174,12 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # Publish each archive to a GitHub Release. On `v*` tag pushes the
-      # tag is `github.ref_name`; on manual `workflow_dispatch` runs the
-      # caller picks a tag (and whether to flag it as a prerelease).
-      # softprops/action-gh-release auto-creates the release + tag on the
-      # first upload and appends to it from the rest of the matrix.
+      # Publish to the GitHub Release. Tag is the bumped tag (manual run)
+      # or the pushed tag (tag-push run).
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.bump.outputs.tag || github.ref_name }}
           files: |
             staging/*.tar.gz
             staging/*.zip
