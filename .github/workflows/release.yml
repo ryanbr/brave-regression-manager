@@ -75,13 +75,88 @@ jobs:
             echo "sha=$(git rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
 
-  build:
+  # Generate a changelog from `git log <prev-tag>..<current>` once, then
+  # share it with the build matrix so the GitHub Release body shows what
+  # actually landed since the last release. Saves the matrix from running
+  # `git log` three times and keeps the body deterministic.
+  notes:
+    name: Release notes
+    runs-on: ubuntu-22.04
     needs: [bump]
-    # Run when triggered by a tag push (bump skipped) OR after a successful
-    # bump on a manual run.
     if: |
       always()
       && (needs.bump.result == 'success' || needs.bump.result == 'skipped')
+    outputs:
+      body: ${{ steps.gen.outputs.body }}
+      tag:  ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump.outputs.sha || github.ref }}
+          fetch-depth: 0    # need full history for `git describe --tags`
+
+      - id: tag
+        shell: bash
+        run: echo "tag=${{ needs.bump.outputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - id: gen
+        shell: bash
+        run: |
+          set -euo pipefail
+          cur="${{ steps.tag.outputs.tag }}"
+          # If the tag exists in the checkout (tag-push run), use it as
+          # the upper bound; otherwise (bump just ran on this commit) the
+          # tag refers to HEAD.
+          if git rev-parse --verify "refs/tags/$cur" >/dev/null 2>&1; then
+            upper="$cur"
+          else
+            upper="HEAD"
+          fi
+          prev=$(git describe --tags --abbrev=0 "$upper^" 2>/dev/null || true)
+
+          repo="${{ github.server_url }}/${{ github.repository }}"
+          if [ -z "$prev" ]; then
+            header="## Initial release"
+            range="$upper"
+            compare_line=""
+          else
+            header="## Changes since $prev"
+            range="$prev..$upper"
+            compare_line="**Full diff**: $repo/compare/$prev...$cur"
+          fi
+
+          # Skip the `Release vX.Y.Z [skip ci]` auto-commits the bump
+          # job creates — they're noise in user-facing notes.
+          {
+            echo "$header"
+            echo
+            git log --pretty=format:'- %s' "$range" \
+              | grep -v -E '^\- Release v[0-9]+\.' \
+              | head -200 \
+              || true
+            echo
+            echo
+            [ -n "$compare_line" ] && echo "$compare_line"
+          } > changelog.md
+          echo "----- generated changelog -----"
+          cat changelog.md
+          echo "----- end -----"
+
+          # Multiline output via heredoc syntax.
+          {
+            echo 'body<<CHANGELOG_EOF'
+            cat changelog.md
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [bump, notes]
+    # Run when triggered by a tag push (bump skipped) OR after a successful
+    # bump on a manual run, AND the notes job has produced a body.
+    if: |
+      always()
+      && (needs.bump.result == 'success' || needs.bump.result == 'skipped')
+      && needs.notes.result == 'success'
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -231,14 +306,19 @@ jobs:
 
       # Publish to the GitHub Release. Tag was resolved earlier; reuse it
       # so the version embedded in the archive name matches the Release
-      # it gets attached to.
+      # it gets attached to. Body comes from the `notes` job — three
+      # matrix jobs all set the same body, softprops takes the first.
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
+          body: ${{ needs.notes.outputs.body }}
+          append_body: false
           files: |
             staging/*.tar.gz
             staging/*.zip
           draft: false
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
-          generate_release_notes: true
+          # Our `notes` job already produced the user-facing body — turn
+          # off GitHub's auto-generated notes so we don't duplicate.
+          generate_release_notes: false
