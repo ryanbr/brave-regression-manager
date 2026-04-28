@@ -52,13 +52,6 @@ exactly which commits to bisect.
   links open in your *Windows* default browser via `explorer.exe <url>`
   instead of in an in-WSL X11 browser.
 
-## Screenshot
-
-(Tab 1, regression bracket detected, commits loaded inline:)
-
-> _add a screenshot once you've run the app once; PNG drop into the_
-> _repo and link from here._
-
 ## Building
 
 ```sh
