@@ -19,8 +19,14 @@ pub fn launch(handle: Handle) -> Result<()> {
         persist_window: false,
         ..Default::default()
     };
+    // Version comes from Cargo.toml's `version` field — `cargo set-version`
+    // bumps it, the release workflow tags `v$version` on git, so the title
+    // bar always matches the GitHub release the user downloaded.
+    const TITLE: &str = concat!(
+        "Brave Regression Manager v", env!("CARGO_PKG_VERSION")
+    );
     eframe::run_native(
-        "Brave Regression Manager",
+        TITLE,
         options,
         Box::new(move |cc| Box::new(app::App::new(cc, handle.clone()))),
     ).map_err(|e| anyhow::anyhow!("eframe: {e}"))
