@@ -125,13 +125,15 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
         cmd.arg("--disable-gpu");
     }
 
-    // macOS: Chromium tries to read/create a `Brave Safe Storage` key in
-    // the login keychain on every launch (used to encrypt cookies / saved
-    // passwords). For a regression-testing harness the prompt is just
-    // friction — we don't need encrypted credential persistence. `basic`
-    // falls back to an obfuscation-only store so Brave never touches the
-    // keychain.
-    #[cfg(target_os = "macos")]
+    // Unix (macOS + Linux): Chromium tries to read/create a `Brave Safe
+    // Storage` key in the OS keychain on every launch (login keychain on
+    // macOS; gnome-libsecret or KWallet on Linux). The unlock prompt is
+    // just friction for a regression-testing harness — we don't need
+    // encrypted credential persistence between throwaway Nightly installs.
+    // `basic` falls back to an obfuscation-only store so Brave never
+    // touches the keychain. Windows uses CryptProtectData with no prompt,
+    // so it doesn't need this.
+    #[cfg(unix)]
     {
         cmd.arg("--password-store=basic");
     }
