@@ -1,0 +1,113 @@
+name: Release
+
+# Triggers a build of every supported target whenever a `v*` tag is pushed.
+# Each job uploads its artifact to a GitHub Release for that tag; the
+# release is created on the first upload and appended to by subsequent
+# uploads.
+on:
+  push:
+    tags: ['v*']
+  # Manual trigger so you can dry-run the matrix without cutting a tag.
+  # Uploads are skipped on workflow_dispatch.
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required for softprops/action-gh-release
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os:     ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            ext:    ''
+            archive: tar.gz
+          - os:     windows-latest
+            target: x86_64-pc-windows-msvc
+            ext:    .exe
+            archive: zip
+          - os:     macos-13            # Intel runner
+            target: x86_64-apple-darwin
+            ext:    ''
+            archive: tar.gz
+          - os:     macos-14            # Apple Silicon runner
+            target: aarch64-apple-darwin
+            ext:    ''
+            archive: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # eframe's `glow` backend + arboard's clipboard backends + rfd's
+      # xdg-portal backend all need a few system libs on Linux.
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev \
+            libgtk-3-dev
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Stage a single archive per target with a predictable name. The
+      # binary is `brave-regress` (the crate name); the archive name embeds
+      # the target triple so all four artifacts coexist on one release.
+      - name: Stage archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage=staging
+          mkdir -p "$stage"
+          name="brave-regress-${{ matrix.target }}"
+          mkdir -p "$stage/$name"
+          cp "target/${{ matrix.target }}/release/brave-regress${{ matrix.ext }}" "$stage/$name/"
+          cp README.md "$stage/$name/" || true
+          cp LICENSE  "$stage/$name/" 2>/dev/null || true
+          ( cd "$stage" && tar -czf "$name.tar.gz" "$name" )
+          ls -la "$stage"
+
+      - name: Stage archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = "staging"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $name  = "brave-regress-${{ matrix.target }}"
+          $dir   = Join-Path $stage $name
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/brave-regress.exe" $dir
+          if (Test-Path README.md) { Copy-Item README.md $dir }
+          if (Test-Path LICENSE)   { Copy-Item LICENSE  $dir }
+          Compress-Archive -Path $dir -DestinationPath (Join-Path $stage "$name.zip") -Force
+          Get-ChildItem $stage
+
+      # Skip uploads on manual `workflow_dispatch` runs — those are for
+      # validating the matrix without cutting a release.
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            staging/*.tar.gz
+            staging/*.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
