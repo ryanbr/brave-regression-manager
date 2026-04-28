@@ -622,6 +622,16 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 };
                 ui.colored_label(chan_color, format!("[{chan_label}]"));
 
+                // Verdict pill — shown only when the tag has a non-Unknown
+                // verdict. Persists across install / uninstall, so a row
+                // can read [BAD] even if the user has since uninstalled
+                // the version they tested.
+                let row_verdict = verdict::version_verdict(&r.tag).unwrap_or(Verdict::Unknown);
+                if row_verdict != Verdict::Unknown {
+                    ui.colored_label(verdict_color(row_verdict),
+                        RichText::new(format!("[{}]", verdict_label(row_verdict))).strong());
+                }
+
                 // Note affordance: small clickable label that opens an
                 // edit popup. `+` (dim) when no note exists; `note` (blue)
                 // with the body as tooltip when one does.
