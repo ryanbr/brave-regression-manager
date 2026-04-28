@@ -7,9 +7,16 @@ name: Release
 on:
   push:
     tags: ['v*']
-  # Manual trigger so you can dry-run the matrix without cutting a tag.
-  # Uploads are skipped on workflow_dispatch.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag for the release (created if it doesn''t exist).'
+        required: true
+        default: v0.1.0-dev
+      prerelease:
+        description: 'Mark this Release as a pre-release.'
+        type: boolean
+        default: true
 
 permissions:
   contents: write   # required for softprops/action-gh-release
@@ -108,16 +115,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # On `v*` tag pushes only, also publish the archive to the GitHub
-      # Release for that tag. softprops/action-gh-release auto-creates the
-      # release on first upload and appends to it from the rest.
+      # Publish each archive to a GitHub Release. On `v*` tag pushes the
+      # tag is `github.ref_name`; on manual `workflow_dispatch` runs the
+      # caller picks a tag (and whether to flag it as a prerelease).
+      # softprops/action-gh-release auto-creates the release + tag on the
+      # first upload and appends to it from the rest of the matrix.
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           files: |
             staging/*.tar.gz
             staging/*.zip
           draft: false
-          prerelease: false
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
           generate_release_notes: true
