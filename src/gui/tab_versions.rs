@@ -1046,6 +1046,48 @@ fn render_compare_one(
                 crate::console::info(&state.console, "compare", &url);
                 open_url(&url);
             }
+            // Chromium changes — opens GitHub directly. Tag-compare when
+            // both pinned Chromium versions are known (best for Stable /
+            // Beta whose Chromium pins are usually tagged); date-bounded
+            // commits/main as a fallback (Nightly's tip-of-tree pins
+            // often aren't tagged).
+            let older_chr = state.available.iter().find(|r| r.tag == older)
+                .and_then(|r| r.chromium_version.clone());
+            let newer_chr = state.available.iter().find(|r| r.tag == newer)
+                .and_then(|r| r.chromium_version.clone());
+            let older_date = state.available.iter().find(|r| r.tag == older)
+                .map(|r| r.published_at.get(..10).unwrap_or(&r.published_at).to_string());
+            let newer_date = state.available.iter().find(|r| r.tag == newer)
+                .map(|r| r.published_at.get(..10).unwrap_or(&r.published_at).to_string());
+            let chromium_url = match (&older_chr, &newer_chr) {
+                (Some(a), Some(b)) => Some(
+                    format!("https://github.com/chromium/chromium/compare/{a}...{b}")),
+                _ => match (&older_date, &newer_date) {
+                    (Some(a), Some(b)) => Some(
+                        // ±2 day padding: Chromium commits land days before
+                        // Brave Nightly pins them, and there's a tail of
+                        // late-arriving fixes after the pin too.
+                        format!("https://github.com/chromium/chromium/commits/main\
+                                 ?since={a}&until={b}")),
+                    _ => None,
+                },
+            };
+            if let Some(url) = chromium_url {
+                let hover = match (&older_chr, &newer_chr) {
+                    (Some(a), Some(b)) => format!(
+                        "Chromium tag compare:\nchromium/chromium/compare/{a}...{b}\
+                         \n\nNote: Nightly pins are often untagged → may 404."),
+                    _ => format!(
+                        "Chromium changes by date (approximate):\n{url}\
+                         \n\nUsed when one or both pinned Chromium versions \
+                         aren't recorded yet — re-fetch GitHub releases to \
+                         enable exact tag-compare."),
+                };
+                if ui.button("Chromium").on_hover_text(hover).clicked() {
+                    crate::console::info(&state.console, "compare", &url);
+                    open_url(&url);
+                }
+            }
             if has_result && ui.small_button("×")
                 .on_hover_text("Clear loaded commits").clicked()
             {
@@ -1155,6 +1197,7 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     .find(|a| Some(&a.name) == r.host_asset.as_ref())
                     .map(|a| (Some(a.browser_download_url.clone()), Some(a.size)))
                     .unwrap_or((None, None));
+                let chromium_version = parse_chromium_version(&r.name);
                 let mut row = ReleaseRow {
                     tag: r.tag,
                     published_at: r.published_at,
@@ -1163,6 +1206,7 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     skip_reason,
                     cached: false,
                     channel,
+                    chromium_version,
                 };
                 row.refresh_cached();
                 row
@@ -1420,6 +1464,25 @@ fn sort_available_rows(
         let ord = ord.then_with(|| a.tag.cmp(&b.tag));
         if asc { ord } else { ord.reverse() }
     });
+}
+
+/// Pull the pinned Chromium version (e.g. `147.0.7727.137`) out of a
+/// Brave release title. Brave's titles are always shaped
+/// `<Channel> v<brave> (Chromium <chromium>)`. Returns `None` for any
+/// title that doesn't match — old caches lacking this field also see
+/// `None` (pre-existing rows from before this column existed).
+fn parse_chromium_version(title: &str) -> Option<String> {
+    let start = title.find("Chromium ")? + "Chromium ".len();
+    let tail = &title[start..];
+    let end = tail.find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(tail.len());
+    let version = &tail[..end];
+    // Sanity-check: must be a four-segment dotted decimal.
+    if version.split('.').count() == 4 && !version.is_empty() {
+        Some(version.to_string())
+    } else {
+        None
+    }
 }
 
 /// Sort installed tags newest-first using semver where parseable; falls

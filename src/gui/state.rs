@@ -70,6 +70,13 @@ pub struct ReleaseRow {
     /// fetch time so the GUI can label rows without re-inspecting them.
     #[serde(default)]
     pub channel:     String,
+    /// The pinned Chromium version parsed out of the GitHub release title
+    /// (e.g. `Release v1.89.145 (Chromium 147.0.7727.137)` → `147.0.7727.137`).
+    /// `None` when the title didn't match the expected pattern. Used to
+    /// build a `chromium/chromium/compare/<a>...<b>` link for the
+    /// per-channel compare panel.
+    #[serde(default)]
+    pub chromium_version: Option<String>,
 }
 
 impl ReleaseRow {
