@@ -384,7 +384,17 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 // Color + bold the version number by its verdict so the row's
                 // status is readable at a glance even if you ignore the bullet.
                 ui.label(RichText::new(&v.tag).monospace().strong().color(dot_color));
-                ui.label(v.folder.display().to_string());
+                let full_path = v.folder.display().to_string();
+                let short_path = truncate_path(&full_path, 48);
+                ui.label(&short_path)
+                    .on_hover_text(&full_path);
+                if ui.small_button("⧉")
+                    .on_hover_text(format!("Copy path:\n{full_path}"))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(full_path.clone());
+                    state.status_msg = format!("copied: {full_path}");
+                }
 
                 if ui.button("Launch").clicked() {
                     let profile = state.selected_profile.clone().unwrap_or_else(|| "default".to_string());
@@ -1175,6 +1185,34 @@ fn sort_tags_newest_first(tags: &mut Vec<String>) {
             _ => b.cmp(a),
         }
     });
+}
+
+/// Shorten a long path for display while keeping the rightmost segments
+/// (which carry the most meaningful info — the install dir name).
+/// Returns the full path unchanged if it's already at or below `max_chars`,
+/// otherwise an ellipsised form like `…/last/two/segments`.
+fn truncate_path(full: &str, max_chars: usize) -> String {
+    if full.chars().count() <= max_chars {
+        return full.to_string();
+    }
+    let sep = if full.contains('\\') && !full.contains('/') { '\\' } else { '/' };
+    let segs: Vec<&str> = full.split(sep).filter(|s| !s.is_empty()).collect();
+    // Greedily keep tail segments until we hit the budget.
+    let mut acc = String::new();
+    for s in segs.iter().rev() {
+        let candidate = if acc.is_empty() { s.to_string() }
+                        else { format!("{s}{sep}{acc}") };
+        if candidate.chars().count() + 2 > max_chars { break; }
+        acc = candidate;
+    }
+    if acc.is_empty() {
+        // Single segment longer than the budget — clip from the left.
+        let tail: String = full.chars().rev().take(max_chars.saturating_sub(1))
+            .collect::<Vec<_>>().into_iter().rev().collect();
+        format!("…{tail}")
+    } else {
+        format!("…{sep}{acc}")
+    }
 }
 
 fn open_in_explorer(path: &std::path::Path) {
