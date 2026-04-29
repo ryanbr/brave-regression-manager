@@ -1,3 +1,5 @@
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
@@ -65,7 +67,14 @@ pub struct VersionVerdict {
     pub related_url: Option<String>,
 }
 
-fn open() -> Result<Connection> {
+/// Process-wide sqlite connection. The GUI calls accessors like
+/// `version_verdict(tag)` and `note(tag)` per row, per frame — at 60fps
+/// over ~70 rows that was ~8000 syscalls/sec opening fresh connections
+/// (each one re-running every `CREATE TABLE IF NOT EXISTS`). Cache one
+/// connection behind a Mutex and keep it open for the whole process.
+static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
+
+fn init_conn() -> Result<Connection> {
     paths::ensure_dirs()?;
     let path = paths::db_dir().join("verdicts.sqlite");
     let conn = Connection::open(path)?;
@@ -100,6 +109,24 @@ fn open() -> Result<Connection> {
         );
     "#)?;
     Ok(conn)
+}
+
+/// Lock the cached sqlite connection. Schema setup runs the first time
+/// only; every subsequent call is a single mutex acquisition. Returning
+/// a `MutexGuard<Connection>` lets callers keep using the existing
+/// `conn.query_row(…)` / `conn.execute(…)` shape unchanged.
+fn open() -> Result<MutexGuard<'static, Connection>> {
+    let cell = match DB.get() {
+        Some(c) => c,
+        None => {
+            let conn = init_conn()?;
+            // OnceLock::set returns Err if another thread won the race.
+            // Either outcome is fine — `get_or_init`-style read after.
+            let _ = DB.set(Mutex::new(conn));
+            DB.get().expect("DB just initialised")
+        }
+    };
+    cell.lock().map_err(|e| anyhow!("verdict db mutex poisoned: {e}"))
 }
 
 /// Read the per-version extra command-line args saved for `tag`.
