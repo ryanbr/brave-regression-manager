@@ -226,7 +226,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             .file_name().and_then(|s| s.to_str())
                             .unwrap_or(state.default_profile_dir.as_str())
                             .to_string();
-                        format!("{short}")
+                        short
                     };
                     if ui.add_enabled(state.default_profile_dir_enabled,
                                       egui::Button::new(label))
@@ -374,7 +374,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             if gch != ch { continue; }
             for (bi, bt, bch) in &bads {
                 if bch != ch { continue; }
-                let d = if gi > bi { gi - bi } else { bi - gi };
+                let d = gi.abs_diff(*bi);
                 if d < best_dist {
                     best_dist = d;
                     let (older, newer) = if gi > bi { (gt.clone(), bt.clone()) }
@@ -506,7 +506,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 };
                 if ui.button(btn_label).on_hover_text(hover).clicked() {
                     let mut dlg = rfd::FileDialog::new()
-                        .set_title(&format!("Pick user-data-dir for {}", v.tag));
+                        .set_title(format!("Pick user-data-dir for {}", v.tag));
                     if !cur.is_empty() {
                         dlg = dlg.set_directory(&cur);
                     }
@@ -1085,8 +1085,8 @@ fn render_compare_one(
                         open_url(&c.html_url);
                     }
                     let date_short = c.date.split('T').next().unwrap_or(&c.date);
-                    super::app::weak_label(ui, format!("{date_short}"));
-                    super::app::weak_label(ui, format!("{}", c.author));
+                    super::app::weak_label(ui, date_short.to_string());
+                    super::app::weak_label(ui, c.author.to_string());
                     ui.label(&c.subject);
                 });
             }
@@ -1424,7 +1424,7 @@ fn sort_available_rows(
 
 /// Sort installed tags newest-first using semver where parseable; falls
 /// back to lexicographic ordering for any tag that isn't `vMAJOR.MINOR.PATCH`.
-fn sort_tags_newest_first(tags: &mut Vec<String>) {
+fn sort_tags_newest_first(tags: &mut [String]) {
     tags.sort_by(|a, b| {
         let pa = semver::Version::parse(a.trim_start_matches('v')).ok();
         let pb = semver::Version::parse(b.trim_start_matches('v')).ok();

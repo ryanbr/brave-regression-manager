@@ -26,6 +26,11 @@ pub enum AvailSortColumn {
 /// One-shot slot a background task writes when it finishes; the GUI polls.
 pub type AsyncSlot<T> = Arc<Mutex<Option<Result<T, String>>>>;
 
+/// Per-channel compare-commit result keyed by the channel string —
+/// stored as `Vec<(channel, result)>` so multiple per-channel loads can
+/// land in the same frame without clobbering one another.
+pub type CompareQueue = Arc<Mutex<Vec<(String, Result<crate::versions::github::CompareResult, String>)>>>;
+
 /// Async results that arrive from background tokio tasks.
 #[derive(Debug, Default, Clone)]
 pub struct AsyncSlots {
@@ -39,9 +44,7 @@ pub struct AsyncSlots {
     pub seed_done:        AsyncSlot<()>,
     pub apply_done:       AsyncSlot<()>,
     /// Compare results queue, keyed by the channel the bracket belongs to.
-    /// A `Vec` rather than a single slot so multiple per-channel compares
-    /// can land in the same frame without clobbering each other.
-    pub compare_done: Arc<Mutex<Vec<(String, Result<crate::versions::github::CompareResult, String>)>>>,
+    pub compare_done: CompareQueue,
 }
 
 /// Latest in-flight download snapshot for the current install (if any).

@@ -285,7 +285,7 @@ fn name_compatible(n: &str, channel: Channel) -> bool {
 }
 
 #[cfg(windows)]
-fn pick_for_host<'a>(assets: &'a [ReleaseAsset], channel: Channel) -> Option<&'a ReleaseAsset> {
+fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAsset> {
     let host_arch = std::env::consts::ARCH;
     let want_arm = host_arch == "aarch64";
 
@@ -347,7 +347,7 @@ fn pick_for_host<'a>(assets: &'a [ReleaseAsset], channel: Channel) -> Option<&'a
 }
 
 #[cfg(target_os = "macos")]
-fn pick_for_host<'a>(assets: &'a [ReleaseAsset], channel: Channel) -> Option<&'a ReleaseAsset> {
+fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAsset> {
     let host_arch = std::env::consts::ARCH;
     let want_arm = host_arch == "aarch64";
 
@@ -456,7 +456,7 @@ pub async fn compare_commits(base: &str, head: &str, token: Option<&str>) -> Res
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn pick_for_host<'a>(assets: &'a [ReleaseAsset], channel: Channel) -> Option<&'a ReleaseAsset> {
+fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAsset> {
     let host_arch = std::env::consts::ARCH;
     let want_arm = host_arch == "aarch64";
 
