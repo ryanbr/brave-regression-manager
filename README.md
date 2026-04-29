@@ -6,7 +6,7 @@ builds and between adblock list configurations. Pick two builds, mark one
 GOOD and one BAD, and the app surfaces the brave-core commit range
 between them — inline, with click-to-open links straight to GitHub.
 
-<img width="998" height="757" alt="regress" src="https://github.com/user-attachments/assets/ca592df8-cefc-489f-af8a-0ba0ef195901" />
+<img width="1003" height="744" alt="ressed" src="https://github.com/user-attachments/assets/47f84239-436f-445e-b697-678a7f21b748" />
 
 ## Why
 
