@@ -58,20 +58,56 @@ impl ChannelFilter {
     }
 }
 
-/// Decide a release's channel by inspecting its asset filenames first
-/// (most accurate — Brave's asset names embed `nightly`/`beta`/no-marker)
-/// and falling back to the GitHub `prerelease` flag when the assets list
-/// is empty (build job hasn't uploaded yet).
+/// Decide a release's channel. Brave's release titles always start with
+/// the channel name ("Release v1.X.Y …", "Beta v1.X.Y …", "Nightly
+/// v1.X.Y …") so the title is the most authoritative signal — way more
+/// reliable than asset filenames, which can include cross-channel
+/// debug/symbol/checksum files that produced false-positive Nightly
+/// classifications for stable Release tags.
+///
+/// Fallback chain when the title is empty or doesn't match the
+/// expected pattern: scan asset filenames, then the `prerelease` flag.
 pub fn detect_release_channel(release: &Release) -> Channel {
-    let any_nightly = release.assets.iter().any(|a| a.name.to_lowercase().contains("nightly"));
-    if any_nightly { return Channel::Nightly; }
-    let any_beta = release.assets.iter().any(|a| {
-        let l = a.name.to_lowercase();
-        l.contains("beta") && !l.contains("nightly")
-    });
-    if any_beta { return Channel::Beta; }
-    // No marker → either a stable release, or a prerelease whose assets
-    // are channel-marker-free (e.g. Windows portable .zip).
+    // 1. Title prefix — by far the most reliable. Brave's release UI
+    //    enforces the "Release "/"Beta "/"Nightly " prefix.
+    let title = release.name.trim_start().to_lowercase();
+    if title.starts_with("nightly ") || title.starts_with("nightly v") {
+        return Channel::Nightly;
+    }
+    if title.starts_with("beta ") || title.starts_with("beta v") {
+        return Channel::Beta;
+    }
+    if title.starts_with("release ") || title.starts_with("release v") {
+        return Channel::Release;
+    }
+    // 2. Asset name scan — only relevant when the title was unhelpful.
+    //    Match channel markers as whole-ish tokens (separator-bounded)
+    //    to avoid false positives like a checksum file named
+    //    `…Nightly-symbols.txt` shipped alongside a stable build.
+    let asset_marker = |needle: &str| -> bool {
+        release.assets.iter().any(|a| {
+            let l = a.name.to_lowercase();
+            // Look for the marker preceded by '-', '_', '.', '/', or
+            // start-of-string AND followed by a separator. Catches
+            // brave-browser-nightly_… but not random substrings.
+            let mut found = false;
+            for (i, _) in l.match_indices(needle) {
+                let prev_ok = i == 0
+                    || matches!(l.as_bytes()[i - 1], b'-' | b'_' | b'.' | b'/');
+                let after = i + needle.len();
+                let next_ok = after == l.len()
+                    || matches!(l.as_bytes()[after], b'-' | b'_' | b'.' | b'/');
+                if prev_ok && next_ok { found = true; break; }
+            }
+            found
+        })
+    };
+    if asset_marker("nightly") { return Channel::Nightly; }
+    if asset_marker("beta")    { return Channel::Beta; }
+    // 3. Last-resort: GitHub's prerelease flag. Nightly + Beta are both
+    //    flagged prerelease=true; we can't tell them apart from this
+    //    signal alone, but defaulting to Nightly here matches what the
+    //    fetcher used to do.
     if release.prerelease { Channel::Nightly } else { Channel::Release }
 }
 
