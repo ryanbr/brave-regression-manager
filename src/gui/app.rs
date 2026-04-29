@@ -228,21 +228,23 @@ impl App {
                 }
             }
         }
-        if let Some(res) = self.state.slots.compare_done.lock().unwrap().take() {
-            self.state.compare_loading = false;
+        let drained: Vec<_> = std::mem::take(&mut *self.state.slots.compare_done.lock().unwrap());
+        for (channel, res) in drained {
+            self.state.compare_loading.remove(&channel);
             match res {
                 Ok(cr) => {
                     let count = cr.commits.len();
                     let total = cr.total;
                     console::info(&self.state.console, "compare",
-                        format!("loaded {count} commits ({total} total) {}..{}", cr.base, cr.head));
-                    self.state.compare_error  = None;
-                    self.state.compare_result = Some(cr);
+                        format!("[{channel}] loaded {count} commits ({total} total) {}..{}",
+                                cr.base, cr.head));
+                    self.state.compare_errors.remove(&channel);
+                    self.state.compare_results.insert(channel, cr);
                 }
                 Err(e) => {
-                    console::error(&self.state.console, "compare", &e);
-                    self.state.compare_error  = Some(e);
-                    self.state.compare_result = None;
+                    console::error(&self.state.console, "compare", format!("[{channel}] {e}"));
+                    self.state.compare_results.remove(&channel);
+                    self.state.compare_errors.insert(channel, e);
                 }
             }
         }
@@ -287,7 +289,7 @@ impl eframe::App for App {
         if self.state.installing.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if self.state.fetching_releases || self.state.seeding || self.state.applying
-            || self.state.compare_loading
+            || !self.state.compare_loading.is_empty()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         } else if !self.state.running.is_empty() {

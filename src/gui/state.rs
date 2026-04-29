@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Arc, Mutex};
@@ -12,6 +12,16 @@ use crate::versions::InstalledVersion;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tab { Versions, Lists, Console }
+
+/// Which column is driving the Available-list sort order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvailSortColumn {
+    Tag,
+    Date,
+    Channel,
+    Verdict,
+    Note,
+}
 
 /// One-shot slot a background task writes when it finishes; the GUI polls.
 pub type AsyncSlot<T> = Arc<Mutex<Option<Result<T, String>>>>;
@@ -28,7 +38,10 @@ pub struct AsyncSlots {
     pub install_progress: ProgressSink,           // updated live during download
     pub seed_done:        AsyncSlot<()>,
     pub apply_done:       AsyncSlot<()>,
-    pub compare_done:     AsyncSlot<crate::versions::github::CompareResult>,
+    /// Compare results queue, keyed by the channel the bracket belongs to.
+    /// A `Vec` rather than a single slot so multiple per-channel compares
+    /// can land in the same frame without clobbering each other.
+    pub compare_done: Arc<Mutex<Vec<(String, Result<crate::versions::github::CompareResult, String>)>>>,
 }
 
 /// Latest in-flight download snapshot for the current install (if any).
@@ -144,6 +157,12 @@ pub struct AppState {
     pub fetching_releases: bool,
     pub installing: Option<String>,
     pub selected_tag: Option<String>,
+
+    /// Sort column + direction for the Available list. Session-only —
+    /// not persisted; defaults to Date Descending (newest first) which
+    /// matches the previous behaviour of "show GitHub's order verbatim".
+    pub avail_sort_by:  AvailSortColumn,
+    pub avail_sort_asc: bool,
     pub running: HashMap<String, RunningBrave>,
 
     /// Persisted preferences should be re-saved on next frame.
@@ -157,10 +176,13 @@ pub struct AppState {
     pub seeding: bool,
     pub applying: bool,
 
-    /// brave-core commit-compare panel.
-    pub compare_loading: bool,
-    pub compare_result:  Option<crate::versions::github::CompareResult>,
-    pub compare_error:   Option<String>,
+    /// brave-core commit-compare panels, keyed by channel ("Release" /
+    /// "Beta" / "Nightly" / "?"). Each channel's GOOD↔BAD bracket gets
+    /// its own loaded-commits state so multiple ranges can be inspected
+    /// side-by-side.
+    pub compare_loading: HashSet<String>,
+    pub compare_results: HashMap<String, crate::versions::github::CompareResult>,
+    pub compare_errors:  HashMap<String, String>,
 
     /// Per-tag freeform-note editor. `Some(tag)` while the popup is open;
     /// the buffer holds the in-progress edit so it survives repaints.
@@ -209,6 +231,8 @@ impl AppState {
             fetching_releases: false,
             installing: None,
             selected_tag: None,
+            avail_sort_by:  AvailSortColumn::Date,
+            avail_sort_asc: false,
             running: HashMap::new(),
             config_dirty: false,
             profiles: vec![],
@@ -217,9 +241,9 @@ impl AppState {
             selected_list: None,
             seeding: false,
             applying: false,
-            compare_loading: false,
-            compare_result: None,
-            compare_error: None,
+            compare_loading: HashSet::new(),
+            compare_results: HashMap::new(),
+            compare_errors:  HashMap::new(),
             editing_note_tag: None,
             editing_note_buf: String::new(),
             status_msg: String::new(),

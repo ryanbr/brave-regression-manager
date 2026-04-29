@@ -335,27 +335,56 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // surface a "commits between these tags" affordance. `older` is the
     // tag with the lower semver, `newer` is the higher — that's the
     // direction GitHub's `compare/A...B` expects to enumerate commits.
-    let mut goods: Vec<(usize, String)> = Vec::new();
-    let mut bads:  Vec<(usize, String)> = Vec::new();
+    //
+    // Compare only within the same channel: a Beta GOOD vs a Nightly BAD
+    // would point at a brave-core range that mixes commits from two
+    // different release branches, which isn't a meaningful regression
+    // window. Each row is tagged with its channel from the available
+    // cache (or "?" when unknown — those still pair with each other but
+    // never cross with a known channel).
+    let channel_of = |tag: &str| -> String {
+        state.available.iter().find(|r| r.tag == tag)
+            .map(|r| r.channel.clone()).unwrap_or_default()
+    };
+    let mut goods: Vec<(usize, String, String)> = Vec::new(); // (idx, tag, channel)
+    let mut bads:  Vec<(usize, String, String)> = Vec::new();
     for (i, tag) in sorted_tags.iter().enumerate() {
+        let ch = channel_of(tag);
         match verdict::version_verdict(tag).unwrap_or(Verdict::Unknown) {
-            Verdict::Good => goods.push((i, tag.clone())),
-            Verdict::Bad  => bads.push((i, tag.clone())),
+            Verdict::Good => goods.push((i, tag.clone(), ch)),
+            Verdict::Bad  => bads.push((i, tag.clone(), ch)),
             // BUGGY / UNSURE / UNTESTED / Unknown don't anchor a bracket.
             // Only firm GOOD ↔ BAD pairs trigger the compare panel.
             _ => {}
         }
     }
-    let mut bracket: Option<(String, String, String, String)> = None; // (older, newer, good, bad)
-    let mut best_dist = usize::MAX;
-    for (gi, gt) in &goods {
-        for (bi, bt) in &bads {
-            let d = if gi > bi { gi - bi } else { bi - gi };
-            if d < best_dist {
-                best_dist = d;
-                let (older, newer) = if gi > bi { (gt.clone(), bt.clone()) } else { (bt.clone(), gt.clone()) };
-                bracket = Some((older, newer, gt.clone(), bt.clone()));
+    // Per-channel brackets: pick the closest GOOD↔BAD pair *within each
+    // channel* so Beta and Nightly (and Release) can each show their own
+    // compare panel side-by-side.
+    let mut channels: Vec<String> = goods.iter().chain(bads.iter())
+        .map(|(_, _, ch)| ch.clone()).collect();
+    channels.sort();
+    channels.dedup();
+    let mut brackets: Vec<(String, String, String, String, String)> = Vec::new();
+    // entries: (channel, older, newer, good, bad)
+    for ch in &channels {
+        let mut best_dist = usize::MAX;
+        let mut chosen: Option<(String, String, String, String)> = None;
+        for (gi, gt, gch) in &goods {
+            if gch != ch { continue; }
+            for (bi, bt, bch) in &bads {
+                if bch != ch { continue; }
+                let d = if gi > bi { gi - bi } else { bi - gi };
+                if d < best_dist {
+                    best_dist = d;
+                    let (older, newer) = if gi > bi { (gt.clone(), bt.clone()) }
+                                         else      { (bt.clone(), gt.clone()) };
+                    chosen = Some((older, newer, gt.clone(), bt.clone()));
+                }
             }
+        }
+        if let Some((older, newer, good, bad)) = chosen {
+            brackets.push((ch.clone(), older, newer, good, bad));
         }
     }
 
@@ -388,7 +417,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 let short_path = truncate_path(&full_path, 48);
                 ui.label(&short_path)
                     .on_hover_text(&full_path);
-                if ui.small_button("⧉")
+                if ui.small_button("Copy")
                     .on_hover_text(format!("Copy path:\n{full_path}"))
                     .clicked()
                 {
@@ -573,7 +602,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Commits between bracketed tags (brave-core) ─────────────────────
     ui.separator();
-    render_compare_section(ui, state, bracket.clone());
+    render_compare_section(ui, state, brackets.clone());
 
     ui.separator();
     let chans = {
@@ -630,53 +659,200 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             };
             ui.colored_label(Color32::from_rgb(220, 180, 60), msg);
         }
+        // Fixed column widths so each row aligns vertically — looks much
+        // tidier than ui.horizontal where every cell sizes itself. Header
+        // uses the same widths so columns line up under their titles.
+        const COL_TAG:      f32 = 110.0;
+        const COL_DATE:     f32 =  90.0;
+        const COL_CHANNEL:  f32 =  76.0;
+        const COL_VERDICT:  f32 =  72.0;
+        const COL_NOTE:     f32 =  44.0;
+        // Status/action is fixed-width so the trailing Comments cell
+        // shares a common left edge across rows. Tight enough that
+        // "installed" rows don't leave a huge empty band; the asset
+        // filename uses Label::truncate(true) to clip-with-ellipsis
+        // so longer names don't push past this cap (full name still
+        // available on hover).
+        const COL_STATUS:   f32 = 260.0;
+
+        // Header row (only when there's data to show). Each title is
+        // clickable: first click sorts by that column, repeat clicks
+        // toggle ascending / descending. The active column shows ▲/▼.
+        if shown > 0 {
+            ui.horizontal(|ui| {
+                let mut header = |ui: &mut Ui, w: f32, text: &str,
+                                  col: super::state::AvailSortColumn|
+                {
+                    ui.scope(|ui| {
+                        ui.set_min_width(w);
+                        ui.set_max_width(w);
+                        let active = state.avail_sort_by == col;
+                        let arrow = if !active { "" }
+                            else if state.avail_sort_asc { " ^" } else { " v" };
+                        let color = if active { Color32::from_rgb(220, 200, 100) }
+                                    else      { Color32::from_gray(160) };
+                        let label = egui::Label::new(
+                            RichText::new(format!("{text}{arrow}")).strong().color(color)
+                        ).sense(egui::Sense::click());
+                        if ui.add(label)
+                            .on_hover_text(if active {
+                                format!("Click to {} order", if state.avail_sort_asc { "descend" } else { "ascend" })
+                            } else {
+                                format!("Sort by {text}")
+                            })
+                            .clicked()
+                        {
+                            if active {
+                                state.avail_sort_asc = !state.avail_sort_asc;
+                            } else {
+                                state.avail_sort_by  = col;
+                                // Default direction per column: dates and
+                                // verdicts feel right newest/strongest-first
+                                // (descending), text fields ascend by default.
+                                state.avail_sort_asc = matches!(col,
+                                    super::state::AvailSortColumn::Tag
+                                  | super::state::AvailSortColumn::Channel
+                                  | super::state::AvailSortColumn::Note);
+                            }
+                        }
+                    });
+                };
+                use super::state::AvailSortColumn as C;
+                header(ui, COL_TAG,     "Tag",     C::Tag);
+                header(ui, COL_DATE,    "Date",    C::Date);
+                header(ui, COL_CHANNEL, "Channel", C::Channel);
+                header(ui, COL_VERDICT, "Verdict", C::Verdict);
+                header(ui, COL_NOTE,    "Note",    C::Note);
+                ui.scope(|ui| {
+                    ui.set_min_width(COL_STATUS);
+                    ui.set_max_width(COL_STATUS);
+                    ui.label(RichText::new("Status / action").strong()
+                        .color(Color32::from_gray(160)));
+                });
+                ui.label(RichText::new("Comments").strong()
+                    .color(Color32::from_gray(160)));
+            });
+            ui.separator();
+        }
+
+        // Apply the active sort to a fresh row order. Sorting happens on
+        // the rendered slice only — the cached `state.available` keeps
+        // GitHub's published order so a re-fetch isn't needed.
+        let mut rows = rows;
+        sort_available_rows(&mut rows, state.avail_sort_by, state.avail_sort_asc);
+
         for r in &rows {
             if state.hide_no_installer && r.host_asset.is_none() { continue; }
             if !date_in_range(&r.published_at, state.date_from, state.date_to) { continue; }
             ui.horizontal(|ui| {
-                ui.monospace(&r.tag);
-                ui.label(short_date(&r.published_at));
-                let (chan_label, chan_color) = match r.channel.as_str() {
-                    "Release" => ("Release", Color32::from_rgb( 80, 170, 240)),
-                    "Beta"    => ("Beta",    Color32::from_rgb(220, 170,  60)),
-                    "Nightly" => ("Nightly", Color32::from_rgb(160, 120, 220)),
-                    _         => ("?",       Color32::from_rgb(150, 150, 150)),
+                // Reserve a fixed-width cell, then place the widget inside.
+                // `scope` lets us set a min_size without bleeding into the
+                // next cell.
+                let fixed_cell = |ui: &mut Ui, w: f32, draw: &mut dyn FnMut(&mut Ui)| {
+                    ui.scope(|ui| {
+                        ui.set_min_width(w);
+                        ui.set_max_width(w);
+                        draw(ui);
+                    });
                 };
-                ui.colored_label(chan_color, format!("[{chan_label}]"));
 
-                // Verdict pill — shown only when the tag has a non-Unknown
-                // verdict. Persists across install / uninstall, so a row
-                // can read [BAD] even if the user has since uninstalled
-                // the version they tested.
-                let row_verdict = verdict::version_verdict(&r.tag).unwrap_or(Verdict::Unknown);
-                if row_verdict != Verdict::Unknown {
-                    ui.colored_label(verdict_color(row_verdict),
-                        RichText::new(format!("[{}]", verdict_label(row_verdict))).strong());
-                }
+                fixed_cell(ui, COL_TAG, &mut |ui| { ui.monospace(&r.tag); });
+                fixed_cell(ui, COL_DATE, &mut |ui| {
+                    ui.label(short_date(&r.published_at));
+                });
+                fixed_cell(ui, COL_CHANNEL, &mut |ui| {
+                    let (chan_label, chan_color) = match r.channel.as_str() {
+                        "Release" => ("Release", Color32::from_rgb( 80, 170, 240)),
+                        "Beta"    => ("Beta",    Color32::from_rgb(220, 170,  60)),
+                        "Nightly" => ("Nightly", Color32::from_rgb(160, 120, 220)),
+                        _         => ("?",       Color32::from_rgb(150, 150, 150)),
+                    };
+                    ui.colored_label(chan_color, format!("[{chan_label}]"));
+                });
 
-                // Note affordance: small clickable label that opens an
-                // edit popup. `+` (dim) when no note exists; `note` (blue)
-                // with the body as tooltip when one does.
+                fixed_cell(ui, COL_VERDICT, &mut |ui| {
+                    let row_verdict = verdict::version_verdict(&r.tag).unwrap_or(Verdict::Unknown);
+                    if row_verdict != Verdict::Unknown {
+                        ui.colored_label(verdict_color(row_verdict),
+                            RichText::new(format!("[{}]", verdict_label(row_verdict))).strong());
+                    }
+                });
+
+                // Note cell — inline so it can mutate state when clicked.
                 let cur_note = verdict::note(&r.tag);
-                let (note_label, note_color, hover) = if cur_note.is_empty() {
-                    ("+", Color32::from_gray(110), "Add a note for this tag".to_string())
-                } else {
-                    ("note", Color32::from_rgb(140, 180, 220), cur_note.clone())
-                };
-                if ui.add(egui::Label::new(
-                        RichText::new(note_label).monospace().color(note_color))
-                        .sense(egui::Sense::click()))
-                    .on_hover_text(hover)
-                    .clicked()
-                {
-                    state.editing_note_tag = Some(r.tag.clone());
-                    state.editing_note_buf = cur_note;
-                }
+                ui.scope(|ui| {
+                    ui.set_min_width(COL_NOTE);
+                    ui.set_max_width(COL_NOTE);
+                    let (note_label, note_color, hover) = if cur_note.is_empty() {
+                        ("+", Color32::from_gray(110), "Add a note for this tag".to_string())
+                    } else {
+                        ("note", Color32::from_rgb(140, 180, 220), cur_note.clone())
+                    };
+                    if ui.add(egui::Label::new(
+                            RichText::new(note_label).monospace().color(note_color))
+                            .sense(egui::Sense::click()))
+                        .on_hover_text(hover)
+                        .clicked()
+                    {
+                        state.editing_note_tag = Some(r.tag.clone());
+                        state.editing_note_buf = cur_note.clone();
+                    }
+                });
 
                 let installed = versions::is_installed(&r.tag);
                 let busy = installing_now.as_deref() == Some(r.tag.as_str());
 
-                match (&r.host_asset, installed, busy) {
+                ui.scope(|ui| {
+                    ui.set_min_width(COL_STATUS);
+                    ui.set_max_width(COL_STATUS);
+                    render_status_cell(ui, state, r, installed, busy);
+                });
+
+                // Comments cell — full note body shown to the right of the
+                // Install column. Force a left-justified layout so the
+                // text hugs the left edge of its slot regardless of the
+                // parent's default alignment. Truncated to one line of
+                // 60 chars; full body in the hover tooltip.
+                if !cur_note.is_empty() {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let one_line = cur_note.lines().next().unwrap_or("");
+                        let trimmed = if one_line.chars().count() > 60 {
+                            let head: String = one_line.chars().take(60).collect();
+                            format!("{head}…")
+                        } else {
+                            one_line.to_string()
+                        };
+                        if ui.add(egui::Label::new(
+                                RichText::new(trimmed).color(Color32::from_rgb(200, 200, 160)))
+                                .sense(egui::Sense::click()))
+                            .on_hover_text(&cur_note)
+                            .clicked()
+                        {
+                            state.editing_note_tag = Some(r.tag.clone());
+                            state.editing_note_buf = cur_note.clone();
+                        }
+                    });
+                }
+            });
+        }
+    });
+
+    render_note_editor(ui, state);
+}
+
+/// Renders the Status / action cell for one Available row. Pulled out of
+/// the row closure so the row can wrap it in a fixed-width scope and the
+/// trailing Comments cell still lines up under its header.
+fn render_status_cell(
+    ui: &mut Ui,
+    state: &mut AppState,
+    r: &super::state::ReleaseRow,
+    installed: bool,
+    busy: bool,
+) {
+    let installing_now = state.installing.clone();
+    ui.horizontal(|ui| {
+        match (&r.host_asset, installed, busy) {
                     (_, true, _) => { ui.label("installed"); }
                     (None, _, _) => {
                         ui.colored_label(Color32::from_rgb(180, 130, 60),
@@ -684,25 +860,31 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         ui.add_enabled(false, egui::Button::new("Install"));
                     }
                     (Some(name), false, true) => {
-                        ui.colored_label(Color32::from_rgb(60, 200, 90), name.to_string());
-                        // Live progress bar with bytes / total / speed / ETA.
+                        ui.add(egui::Label::new(
+                            RichText::new(name).color(Color32::from_rgb(60, 200, 90)))
+                            .truncate(true))
+                            .on_hover_text(format!("Asset: {name}"));
                         let progress = super::state::current_progress(&state.slots);
                         if let Some(p) = progress.filter(|p| p.tag == r.tag) {
                             let txt = format_progress_text(&p);
                             ui.add(egui::ProgressBar::new(p.fraction())
-                                   .desired_width(260.0).show_percentage().text(txt));
+                                   .desired_width(180.0).show_percentage().text(txt));
                         } else {
                             ui.label("installing…");
                         }
                     }
                     (Some(name), false, false) => {
-                        ui.colored_label(Color32::from_rgb(60, 200, 90), name.to_string());
+                        ui.add(egui::Label::new(
+                            RichText::new(name).color(Color32::from_rgb(60, 200, 90)))
+                            .truncate(true))
+                            .on_hover_text(format!("Asset: {name}"));
                         if r.cached {
                             ui.colored_label(Color32::from_rgb(140, 180, 220), "[cached]");
                         }
                         let btn_label = if r.cached { "Install (cached)" } else { "Install" };
                         if ui.add_enabled(installing_now.is_none(),
-                                          egui::Button::new(btn_label)).clicked() {
+                                          egui::Button::new(btn_label)).clicked()
+                        {
                             state.installing = Some(r.tag.clone());
                             state.status_msg = format!("installing {}…", r.tag);
                             let slot     = state.slots.install_done.clone();
@@ -714,9 +896,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             let size     = r.asset_size;
                             state.rt.spawn(async move {
                                 let result = match (url, size) {
-                                    // Fast path: we already have the URL + size from
-                                    // the listing — skip the second GitHub call so we
-                                    // don't burn another anonymous-rate-limit slot.
                                     (Some(u), Some(s)) =>
                                         versions::install::install_tag_with_asset(
                                             &tag2, &name2, &u, s, Some(progress)).await,
@@ -729,9 +908,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                 *slot.lock().unwrap() = Some(result);
                             });
                         }
-                        // Only show diagnose-button when the asset is actually
-                        // on disk. When not cached we just don't render the
-                        // button at all (no disabled placeholder).
                         if r.cached
                             && ui.button("?").on_hover_text("Diagnose downloaded installer").clicked()
                         {
@@ -755,10 +931,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     }
                 }
             });
-        }
-    });
-
-    render_note_editor(ui, state);
 }
 
 /// Floating popup for editing the freeform note attached to a tag.
@@ -811,115 +983,128 @@ fn render_note_editor(ui: &mut Ui, state: &mut AppState) {
     }
 }
 
-/// Renders the "Commits in range" panel under the Installed list. Shows
-/// a Load button that fetches `brave/brave-core/compare/<older>...<newer>`
-/// in the background; once the result lands, lists each commit with a
-/// click-to-open link to its GitHub page.
+/// Renders one "Commits in range" panel per channel that has a
+/// GOOD↔BAD pair installed. Each panel hits
+/// `brave/brave-core/compare/<older>...<newer>` independently so a Beta
+/// regression and a Nightly regression can be inspected side-by-side.
 fn render_compare_section(
     ui: &mut Ui,
     state: &mut AppState,
-    bracket: Option<(String, String, String, String)>, // (older, newer, good, bad)
+    brackets: Vec<(String, String, String, String, String)>, // (channel, older, newer, good, bad)
 ) {
-    // Drop stale commits when the active bracket no longer matches what
-    // we previously loaded (verdicts changed, a version was uninstalled,
-    // bracket disappeared entirely, etc.).
-    let stale = match (&bracket, &state.compare_result) {
-        (Some((o, n, _, _)), Some(cr)) => &cr.base != o || &cr.head != n,
-        (None,               Some(_))  => true,
-        _                              => false,
-    };
-    if stale {
-        state.compare_result = None;
-        state.compare_error  = None;
-    }
+    // Drop loaded commits whose channel either no longer has a bracket
+    // or whose bracket endpoints have changed (verdict edits, uninstalls).
+    let valid: std::collections::HashMap<String, (String, String)> = brackets.iter()
+        .map(|(ch, o, n, _, _)| (ch.clone(), (o.clone(), n.clone()))).collect();
+    state.compare_results.retain(|ch, cr| {
+        valid.get(ch).map(|(o, n)| &cr.base == o && &cr.head == n).unwrap_or(false)
+    });
+    state.compare_errors.retain(|ch, _| valid.contains_key(ch));
 
     let cmp_heading_size = egui::TextStyle::Body.resolve(ui.style()).size + 2.0;
     ui.label(RichText::new("Commits in bracket (brave-core)")
         .strong().size(cmp_heading_size));
-    match &bracket {
-        Some((older, newer, good, bad)) => {
-            ui.horizontal(|ui| {
-                ui.colored_label(Color32::from_rgb(220, 180, 60),
-                    format!("GOOD {good} ↔ BAD {bad}  (range {older}...{newer})"));
-                let cur_matches = state.compare_result.as_ref()
-                    .map(|c| c.base == *older && c.head == *newer).unwrap_or(false);
-                let label = if state.compare_loading { "Loading…".to_string() }
-                    else if cur_matches               { "Reload".to_string() }
-                    else                              { format!("Load {older}...{newer}") };
-                if ui.add_enabled(!state.compare_loading, egui::Button::new(label)).clicked() {
-                    spawn_compare(state, older.clone(), newer.clone());
-                }
-                if ui.button("Open on GitHub").on_hover_text(format!(
-                    "https://github.com/brave/brave-core/compare/{older}...{newer}")).clicked()
-                {
-                    let url = format!("https://github.com/brave/brave-core/compare/{older}...{newer}");
-                    crate::console::info(&state.console, "compare", &url);
-                    open_url(&url);
-                }
-                if state.compare_result.is_some() && ui.small_button("×")
-                    .on_hover_text("Clear loaded commits").clicked()
-                {
-                    state.compare_result = None;
-                    state.compare_error  = None;
-                }
-            });
-        }
-        None => {
-            super::app::weak_label(ui,
-                "(mark a version GOOD and another BAD to enable the compare panel)");
-        }
+
+    if brackets.is_empty() {
+        super::app::weak_label(ui,
+            "(mark a version GOOD and another BAD in the same channel to enable the compare panel)");
+        return;
     }
 
-    if let Some(err) = &state.compare_error {
-        ui.colored_label(Color32::from_rgb(220, 80, 80),
-            format!("compare failed: {err}"));
+    for (channel, older, newer, good, bad) in &brackets {
+        render_compare_one(ui, state, channel, older, newer, good, bad);
     }
+}
 
-    let Some(cr) = state.compare_result.clone() else { return; };
-    ui.horizontal(|ui| {
-        super::app::weak_label(ui, format!(
-            "{} {}..{}  ·  showing {} of {}{}",
-            if cr.commits.is_empty() { "no commits" } else { "" },
-            cr.base, cr.head, cr.commits.len(), cr.total,
-            if cr.truncated { " (capped at 250 by GitHub — open on GitHub for full list)" } else { "" }
-        ));
-    });
-    let row_h = ui.spacing().interact_size.y + 2.0;
-    egui::ScrollArea::vertical().id_source("compare_commits")
-        .max_height(row_h * 8.0)
-        .auto_shrink([false, true]).show(ui, |ui|
-    {
-        for c in &cr.commits {
-            ui.horizontal(|ui| {
-                if ui.add(egui::Label::new(
-                        RichText::new(&c.short).monospace()
-                            .color(Color32::from_rgb(140, 180, 220)))
-                        .sense(egui::Sense::click()))
-                    .on_hover_text(format!("Open commit on GitHub:\n{}", c.html_url))
-                    .clicked()
-                {
-                    open_url(&c.html_url);
-                }
-                let date_short = c.date.split('T').next().unwrap_or(&c.date);
-                super::app::weak_label(ui, format!("{date_short}"));
-                super::app::weak_label(ui, format!("{}", c.author));
-                ui.label(&c.subject);
-            });
+fn render_compare_one(
+    ui: &mut Ui,
+    state: &mut AppState,
+    channel: &str,
+    older: &str,
+    newer: &str,
+    good: &str,
+    bad: &str,
+) {
+    let loading = state.compare_loading.contains(channel);
+    let has_result = state.compare_results.contains_key(channel);
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("[{channel}]")).strong().monospace());
+            ui.colored_label(Color32::from_rgb(220, 180, 60),
+                format!("GOOD {good} ↔ BAD {bad}  (range {older}...{newer})"));
+            let label = if loading        { "Loading…".to_string() }
+                else if has_result        { "Reload".to_string() }
+                else                      { format!("Load {older}...{newer}") };
+            if ui.add_enabled(!loading, egui::Button::new(label)).clicked() {
+                spawn_compare(state, channel.to_string(),
+                              older.to_string(), newer.to_string());
+            }
+            if ui.button("Open on GitHub").on_hover_text(format!(
+                "https://github.com/brave/brave-core/compare/{older}...{newer}")).clicked()
+            {
+                let url = format!("https://github.com/brave/brave-core/compare/{older}...{newer}");
+                crate::console::info(&state.console, "compare", &url);
+                open_url(&url);
+            }
+            if has_result && ui.small_button("×")
+                .on_hover_text("Clear loaded commits").clicked()
+            {
+                state.compare_results.remove(channel);
+                state.compare_errors.remove(channel);
+            }
+        });
+
+        if let Some(err) = state.compare_errors.get(channel) {
+            ui.colored_label(Color32::from_rgb(220, 80, 80),
+                format!("compare failed: {err}"));
         }
+
+        let Some(cr) = state.compare_results.get(channel).cloned() else { return; };
+        ui.horizontal(|ui| {
+            super::app::weak_label(ui, format!(
+                "{} {}..{}  ·  showing {} of {}{}",
+                if cr.commits.is_empty() { "no commits" } else { "" },
+                cr.base, cr.head, cr.commits.len(), cr.total,
+                if cr.truncated { " (capped at 250 by GitHub — open on GitHub for full list)" } else { "" }
+            ));
+        });
+        let row_h = ui.spacing().interact_size.y + 2.0;
+        egui::ScrollArea::vertical().id_source(("compare_commits", channel))
+            .max_height(row_h * 8.0)
+            .auto_shrink([false, true]).show(ui, |ui|
+        {
+            for c in &cr.commits {
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Label::new(
+                            RichText::new(&c.short).monospace()
+                                .color(Color32::from_rgb(140, 180, 220)))
+                            .sense(egui::Sense::click()))
+                        .on_hover_text(format!("Open commit on GitHub:\n{}", c.html_url))
+                        .clicked()
+                    {
+                        open_url(&c.html_url);
+                    }
+                    let date_short = c.date.split('T').next().unwrap_or(&c.date);
+                    super::app::weak_label(ui, format!("{date_short}"));
+                    super::app::weak_label(ui, format!("{}", c.author));
+                    ui.label(&c.subject);
+                });
+            }
+        });
     });
 }
 
-fn spawn_compare(state: &mut AppState, older: String, newer: String) {
-    state.compare_loading = true;
-    state.compare_error   = None;
-    state.status_msg      = format!("loading commits {older}...{newer}…");
+fn spawn_compare(state: &mut AppState, channel: String, older: String, newer: String) {
+    state.compare_loading.insert(channel.clone());
+    state.compare_errors.remove(&channel);
+    state.status_msg = format!("loading commits {older}...{newer}… [{channel}]");
     let token = state.github_token.clone();
     let slot  = state.slots.compare_done.clone();
     state.rt.spawn(async move {
         let tok = if token.is_empty() { None } else { Some(token.as_str()) };
         let result = versions::github::compare_commits(&older, &newer, tok).await
             .map_err(|e| format!("{e:#}"));
-        *slot.lock().unwrap() = Some(result);
+        slot.lock().unwrap().push((channel, result));
     });
 }
 
@@ -1172,6 +1357,69 @@ fn open_url(url: &str) {
         }
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }
+}
+
+/// Order Available rows by the user-selected column. Tag uses a
+/// semver-aware compare so v1.91.10 sorts after v1.91.9; date and
+/// channel/note are plain string compares; verdict uses a fixed rank
+/// so [BAD] / [BUGGY] / [UNSURE] / [GOOD] / [NEW] / (none) cluster
+/// predictably rather than by enum-discriminant order.
+fn sort_available_rows(
+    rows: &mut [super::state::ReleaseRow],
+    by: super::state::AvailSortColumn,
+    asc: bool,
+) {
+    use super::state::AvailSortColumn as C;
+    use crate::verdict::{self, Verdict};
+    let verdict_rank = |v: Verdict| -> u8 {
+        match v {
+            Verdict::Bad      => 0,
+            Verdict::Buggy    => 1,
+            Verdict::Unsure   => 2,
+            Verdict::Good     => 3,
+            Verdict::Untested => 4,
+            Verdict::Unknown  => 5,
+        }
+    };
+    rows.sort_by(|a, b| {
+        let ord = match by {
+            C::Tag => {
+                let pa = semver::Version::parse(a.tag.trim_start_matches('v')).ok();
+                let pb = semver::Version::parse(b.tag.trim_start_matches('v')).ok();
+                match (pa, pb) {
+                    (Some(va), Some(vb)) => va.cmp(&vb),
+                    _ => a.tag.cmp(&b.tag),
+                }
+            }
+            C::Date => {
+                // Compare only the YYYY-MM-DD prefix that the column
+                // actually displays — sorting on the full timestamp would
+                // let an older-tag release published later in the day
+                // jump above a newer tag with the same visible date.
+                let a_day = a.published_at.get(..10).unwrap_or(&a.published_at);
+                let b_day = b.published_at.get(..10).unwrap_or(&b.published_at);
+                a_day.cmp(b_day)
+            }
+            C::Channel => a.channel.cmp(&b.channel),
+            C::Verdict => {
+                let ra = verdict_rank(verdict::version_verdict(&a.tag).unwrap_or(Verdict::Unknown));
+                let rb = verdict_rank(verdict::version_verdict(&b.tag).unwrap_or(Verdict::Unknown));
+                ra.cmp(&rb)
+            }
+            C::Note => {
+                // Two-key sort: rows with notes first, then by note body.
+                let na = verdict::note(&a.tag);
+                let nb = verdict::note(&b.tag);
+                let pa = if na.is_empty() { 1 } else { 0 };
+                let pb = if nb.is_empty() { 1 } else { 0 };
+                pa.cmp(&pb).then(na.cmp(&nb))
+            }
+        };
+        // Tag-asc as the stable secondary key — equal primary keys sort
+        // by tag so the row order is deterministic between repaints.
+        let ord = ord.then_with(|| a.tag.cmp(&b.tag));
+        if asc { ord } else { ord.reverse() }
+    });
 }
 
 /// Sort installed tags newest-first using semver where parseable; falls
