@@ -76,7 +76,7 @@ arboard     = "3"
 # Native folder-picker for the per-version "Browse to custom profile dir"
 # button. xdg-portal feature avoids a GTK system-dep build pull-in on
 # Linux; on Windows / macOS it uses the platform's native dialog.
-rfd         = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
+rfd         = { version = "0.17", default-features = false, features = ["xdg-portal", "pollster"] }
 
 # misc
 chrono      = { version = "0.4", features = ["serde"] }
