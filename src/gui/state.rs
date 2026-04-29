@@ -31,6 +31,11 @@ pub type AsyncSlot<T> = Arc<Mutex<Option<Result<T, String>>>>;
 /// land in the same frame without clobbering one another.
 pub type CompareQueue = Arc<Mutex<Vec<(String, Result<crate::versions::github::CompareResult, String>)>>>;
 
+/// One-shot tag-metadata fetch results, keyed by tag. Multiple in-flight
+/// fetches can resolve into the same frame, so we collect results in a
+/// `Vec` rather than overwriting a single slot.
+pub type TagMetaQueue = Arc<Mutex<Vec<(String, Result<(), String>)>>>;
+
 /// Async results that arrive from background tokio tasks.
 #[derive(Debug, Default, Clone)]
 pub struct AsyncSlots {
@@ -45,6 +50,10 @@ pub struct AsyncSlots {
     pub apply_done:       AsyncSlot<()>,
     /// Compare results queue, keyed by the channel the bracket belongs to.
     pub compare_done: CompareQueue,
+    /// One-shot per-tag metadata fetch results — used by the Chromium
+    /// override row to populate fields for tags outside the current
+    /// fetch window.
+    pub tag_metadata_done: TagMetaQueue,
 }
 
 /// Latest in-flight download snapshot for the current install (if any).
@@ -194,6 +203,16 @@ pub struct AppState {
     pub compare_results: HashMap<String, crate::versions::github::CompareResult>,
     pub compare_errors:  HashMap<String, String>,
 
+    /// User-editable Chromium version override keyed by
+    /// `(channel, older_tag, newer_tag)` so a new bracket (e.g. after a
+    /// verdict change) always gets a fresh auto-paste from the parsed
+    /// pins instead of carrying stale edits from a different range.
+    /// Session-only — not persisted; cleared by the "reset" button.
+    pub chromium_overrides: HashMap<(String, String, String), (String, String)>,
+    /// Tags whose one-shot metadata fetch is in-flight — used to disable
+    /// the per-tag "Fetch tag info" button while the request is running.
+    pub tag_fetch_pending: HashSet<String>,
+
     /// Per-tag freeform-note editor. `Some(tag)` while the popup is open;
     /// the buffer holds the in-progress edit so it survives repaints.
     pub editing_note_tag: Option<String>,
@@ -254,6 +273,8 @@ impl AppState {
             compare_loading: HashSet::new(),
             compare_results: HashMap::new(),
             compare_errors:  HashMap::new(),
+            chromium_overrides: HashMap::new(),
+            tag_fetch_pending: HashSet::new(),
             editing_note_tag: None,
             editing_note_buf: String::new(),
             status_msg: String::new(),

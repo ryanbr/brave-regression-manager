@@ -107,6 +107,12 @@ fn init_conn() -> Result<Connection> {
             body       TEXT NOT NULL,
             updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS tag_metadata (
+            tag              TEXT PRIMARY KEY,
+            chromium_version TEXT,
+            published_at     TEXT,
+            channel          TEXT
+        );
     "#)?;
     Ok(conn)
 }
@@ -266,4 +272,39 @@ pub fn version_verdict(tag: &str) -> Result<Verdict> {
         "SELECT verdict FROM version_verdict WHERE tag=?1",
         params![tag], |r| r.get(0)).ok();
     Ok(v.as_deref().map(Verdict::from_db).unwrap_or(Verdict::Unknown))
+}
+
+/// Persist a per-tag (chromium_version, published_at, channel) so the
+/// GUI can fall back to it when a tag isn't in the currently-fetched
+/// available list (e.g. an older installed tag, or a tag from before
+/// the active filter window).
+pub fn upsert_tag_metadata(
+    tag: &str,
+    chromium_version: Option<&str>,
+    published_at: Option<&str>,
+    channel: Option<&str>,
+) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO tag_metadata(tag, chromium_version, published_at, channel)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(tag) DO UPDATE SET
+             chromium_version = COALESCE(excluded.chromium_version, tag_metadata.chromium_version),
+             published_at     = COALESCE(excluded.published_at,     tag_metadata.published_at),
+             channel          = COALESCE(excluded.channel,          tag_metadata.channel)",
+        params![tag, chromium_version, published_at, channel])?;
+    Ok(())
+}
+
+/// Read the persisted (chromium_version, published_at, channel) for a tag.
+/// All three are Option — any subset may be missing.
+pub fn tag_metadata(tag: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let conn = match open() { Ok(c) => c, Err(_) => return (None, None, None) };
+    conn.query_row(
+        "SELECT chromium_version, published_at, channel FROM tag_metadata WHERE tag=?1",
+        params![tag],
+        |r| Ok((r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?)))
+        .unwrap_or((None, None, None))
 }

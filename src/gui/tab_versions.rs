@@ -30,7 +30,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.heading("Brave Versions");
 
     // ── Row 1: primary actions + summary (wraps on narrow windows) ────────
+    // Bump every text style up by 3px in this row so the action buttons
+    // (Refresh installed / Fetch GitHub releases) read clearly larger
+    // than the rest of the page. style_mut() COW-clones the parent's
+    // style so the change only applies to this scope.
     ui.horizontal_wrapped(|ui| {
+        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+            font_id.size += 3.0;
+        }
         if ui.button("Refresh installed").clicked() {
             state.installed = versions::list_installed().unwrap_or_default();
         }
@@ -56,8 +63,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Row 2: filters (hide + date range) ────────────────────────────────
     ui.horizontal_wrapped(|ui| {
+        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+            font_id.size += 3.0;
+        }
         let mut hide = state.hide_no_installer;
-        if ui.checkbox(&mut hide, "Hide releases with no installer for this platform").changed() {
+        if ui.checkbox(&mut hide, "Hide releases with no installer").changed() {
             state.hide_no_installer = hide;
             state.config_dirty = true;
         }
@@ -92,18 +102,30 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             }
         }
 
-        // Auto-refetch on any date filter change so the new `stop_at`
-        // (date_from) is honoured by the fetcher — pulls in extra pages
-        // when the user widens the window backward, and stops earlier
-        // when they narrow it. Skip when a fetch is already in flight or
-        // when we have nothing cached yet (let the user click Fetch
-        // explicitly the first time).
+        // Date filter changed: only refetch when the new window asks for
+        // releases *older* than anything currently cached. Narrowing the
+        // range (or shifting forward in time) is a pure client-side
+        // filter — re-rendering the existing rows is instant and free,
+        // no API call needed. Until the user clicks "Fetch GitHub
+        // releases" again, the in-memory cache is treated as the source
+        // of truth for everything inside its date span.
         let date_changed  = state.date_from != prev_from || state.date_to != prev_to;
         let filter_active = state.date_from.is_some() || state.date_to.is_some();
         if date_changed && filter_active
             && !state.available.is_empty() && !state.fetching_releases
         {
-            spawn_fetch(state);
+            let oldest_cached = state.available.iter()
+                .filter_map(|r| r.published_at.get(..10))
+                .filter_map(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                .min();
+            let needs_older = match (state.date_from, oldest_cached) {
+                (Some(want), Some(have)) => want < have,
+                (Some(_),    None)       => true,  // empty cache, fetch
+                _                        => false,
+            };
+            if needs_older {
+                spawn_fetch(state);
+            }
         }
     });
 
@@ -822,8 +844,16 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         } else {
                             one_line.to_string()
                         };
+                        // Theme-aware: soft amber on dark for low contrast
+                        // against the dark panel; a deeper olive on light
+                        // mode where the dark text on cream is legible.
+                        let note_color = if ui.ctx().style().visuals.dark_mode {
+                            Color32::from_rgb(200, 200, 160)
+                        } else {
+                            Color32::from_rgb( 90,  80,  10)
+                        };
                         if ui.add(egui::Label::new(
-                                RichText::new(trimmed).color(Color32::from_rgb(200, 200, 160)))
+                                RichText::new(trimmed).color(note_color))
                                 .sense(egui::Sense::click()))
                             .on_hover_text(&cur_note)
                             .clicked()
@@ -1011,9 +1041,18 @@ fn render_compare_section(
         return;
     }
 
-    for (channel, older, newer, good, bad) in &brackets {
-        render_compare_one(ui, state, channel, older, newer, good, bad);
-    }
+    // Match the +3 bump used on the Brave Versions action rows so the
+    // Load / Open on GitHub / Chromium buttons inside each bracket panel
+    // read at the same scale. Scoped via allocate_ui so the styling
+    // doesn't bleed into siblings rendered after this section.
+    ui.allocate_ui(ui.available_size(), |ui| {
+        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+            font_id.size += 3.0;
+        }
+        for (channel, older, newer, good, bad) in &brackets {
+            render_compare_one(ui, state, channel, older, newer, good, bad);
+        }
+    });
 }
 
 fn render_compare_one(
@@ -1027,6 +1066,26 @@ fn render_compare_one(
 ) {
     let loading = state.compare_loading.contains(channel);
     let has_result = state.compare_results.contains_key(channel);
+    // Auto-parsed pinned Chromium versions + dates from the bracket
+    // endpoints — computed in the outer scope so the override row below
+    // can reuse them as seeds and as the "reset" target. Falls back to
+    // the sqlite tag_metadata cache when a bracket tag isn't in the
+    // currently-loaded available window (e.g. an older installed tag).
+    let lookup_chr = |tag: &str| -> Option<String> {
+        state.available.iter().find(|r| r.tag == tag)
+            .and_then(|r| r.chromium_version.clone())
+            .or_else(|| verdict::tag_metadata(tag).0)
+    };
+    let lookup_date = |tag: &str| -> Option<String> {
+        state.available.iter().find(|r| r.tag == tag)
+            .map(|r| r.published_at.get(..10).unwrap_or(&r.published_at).to_string())
+            .or_else(|| verdict::tag_metadata(tag).1
+                .map(|s| s.get(..10).unwrap_or(&s).to_string()))
+    };
+    let older_chr = lookup_chr(older);
+    let newer_chr = lookup_chr(newer);
+    let older_date = lookup_date(older);
+    let newer_date = lookup_date(newer);
     ui.group(|ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("[{channel}]")).strong().monospace());
@@ -1051,14 +1110,6 @@ fn render_compare_one(
             // Beta whose Chromium pins are usually tagged); date-bounded
             // commits/main as a fallback (Nightly's tip-of-tree pins
             // often aren't tagged).
-            let older_chr = state.available.iter().find(|r| r.tag == older)
-                .and_then(|r| r.chromium_version.clone());
-            let newer_chr = state.available.iter().find(|r| r.tag == newer)
-                .and_then(|r| r.chromium_version.clone());
-            let older_date = state.available.iter().find(|r| r.tag == older)
-                .map(|r| r.published_at.get(..10).unwrap_or(&r.published_at).to_string());
-            let newer_date = state.available.iter().find(|r| r.tag == newer)
-                .map(|r| r.published_at.get(..10).unwrap_or(&r.published_at).to_string());
             let chromium_url = match (&older_chr, &newer_chr) {
                 (Some(a), Some(b)) => Some(
                     format!("https://github.com/chromium/chromium/compare/{a}...{b}")),
@@ -1093,6 +1144,88 @@ fn render_compare_one(
             {
                 state.compare_results.remove(channel);
                 state.compare_errors.remove(channel);
+            }
+        });
+
+        // ── Chromium tag override row (Design A) ───────────────────────
+        // Two text fields seeded with the auto-parsed pins, plus an
+        // "Open compare" button so the user can nudge either side to a
+        // nearby tagged Chromium milestone when Brave Nightly's exact
+        // pin isn't tagged on chromium/chromium.
+        let auto_older = older_chr.clone().unwrap_or_default();
+        let auto_newer = newer_chr.clone().unwrap_or_default();
+        ui.horizontal(|ui| {
+            super::app::weak_label(ui, "Chromium tags:");
+            let key = (channel.to_string(), older.to_string(), newer.to_string());
+            let entry = state.chromium_overrides.entry(key.clone())
+                .or_insert_with(|| (auto_older.clone(), auto_newer.clone()));
+            let cur_a = entry.0.clone();
+            let cur_b = entry.1.clone();
+            ui.add(egui::TextEdit::singleline(&mut entry.0)
+                .desired_width(120.0)
+                .hint_text("147.0.7727.130"));
+            super::app::weak_label(ui, "…");
+            ui.add(egui::TextEdit::singleline(&mut entry.1)
+                .desired_width(120.0)
+                .hint_text("147.0.7727.137"));
+            let can_compare = !entry.0.trim().is_empty() && !entry.1.trim().is_empty();
+            if ui.add_enabled(can_compare, egui::Button::new("Open compare"))
+                .on_hover_text(format!(
+                    "https://github.com/chromium/chromium/compare/{}...{}",
+                    entry.0.trim(), entry.1.trim()))
+                .clicked()
+            {
+                let url = format!(
+                    "https://github.com/chromium/chromium/compare/{}...{}",
+                    entry.0.trim(), entry.1.trim());
+                crate::console::info(&state.console, "compare", &url);
+                open_url(&url);
+            }
+            // Right-aligned hint showing what the auto-parser pulled, so
+            // the user can spot when they've drifted away from the pinned
+            // versions.
+            let drifted = cur_a != auto_older || cur_b != auto_newer;
+            if drifted {
+                if ui.small_button("reset")
+                    .on_hover_text(format!("Restore pinned: {auto_older} -> {auto_newer}"))
+                    .clicked()
+                {
+                    state.chromium_overrides.insert(key,
+                        (auto_older.clone(), auto_newer.clone()));
+                }
+            } else {
+                let pinned_text = match (auto_older.is_empty(), auto_newer.is_empty()) {
+                    (false, false) => format!("pinned: {auto_older} -> {auto_newer}"),
+                    _              => "pinned: (unknown)".to_string(),
+                };
+                super::app::weak_label(ui, pinned_text);
+            }
+            // Per-tag metadata fetch — populates the pinned Chromium
+            // version for an installed bracket endpoint that isn't in
+            // the currently-loaded available window. One API call per
+            // missing tag; results upserted to sqlite.
+            let missing: Vec<&str> = [
+                (older, &auto_older), (newer, &auto_newer)
+            ].iter()
+                .filter_map(|(tag, val)| if val.is_empty() { Some(*tag) } else { None })
+                .collect();
+            if !missing.is_empty() {
+                let any_in_flight = missing.iter().any(|t|
+                    state.tag_fetch_pending.contains(*t));
+                let label = if any_in_flight { "Fetching…" }
+                            else             { "Fetch tag info" };
+                if ui.add_enabled(!any_in_flight, egui::Button::new(label))
+                    .on_hover_text(format!(
+                        "Fetch GitHub release metadata for: {}\n\nUses one API call \
+                         per missing tag — useful when the tag is older than the \
+                         current Available fetch window.",
+                        missing.join(", ")))
+                    .clicked()
+                {
+                    for tag in &missing {
+                        spawn_tag_metadata_fetch(state, (*tag).to_string());
+                    }
+                }
             }
         });
 
@@ -1133,6 +1266,43 @@ fn render_compare_one(
                 });
             }
         });
+    });
+}
+
+/// Fire a one-shot GitHub fetch for `tag`'s release metadata, parse the
+/// pinned Chromium version + channel out of it, upsert into the sqlite
+/// `tag_metadata` cache. The bracket panel re-renders next frame and
+/// picks up the populated values via the cache fallback.
+fn spawn_tag_metadata_fetch(state: &mut AppState, tag: String) {
+    if state.tag_fetch_pending.contains(&tag) { return; }
+    state.tag_fetch_pending.insert(tag.clone());
+    state.status_msg = format!("fetching tag info: {tag}…");
+    let token = state.github_token.clone();
+    let slot  = state.slots.tag_metadata_done.clone();
+    state.rt.spawn(async move {
+        let tok = if token.is_empty() { None } else { Some(token.as_str()) };
+        let result = versions::github::fetch_release_metadata(&tag, tok).await
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|(name, published_at, prerelease)| {
+                let chromium = parse_chromium_version(&name);
+                // Channel guess: prefix-match the title; fallback to
+                // prerelease flag (Stable=false; Beta/Nightly=true,
+                // best-guess Nightly when ambiguous).
+                let channel = {
+                    let lc = name.trim_start().to_lowercase();
+                    if lc.starts_with("nightly ") || lc.starts_with("nightly v") { "Nightly" }
+                    else if lc.starts_with("beta ") || lc.starts_with("beta v") { "Beta" }
+                    else if lc.starts_with("release ") || lc.starts_with("release v") { "Release" }
+                    else if prerelease { "Nightly" } else { "Release" }
+                };
+                crate::verdict::upsert_tag_metadata(
+                    &tag,
+                    chromium.as_deref(),
+                    Some(&published_at),
+                    Some(channel),
+                ).map_err(|e| format!("sqlite upsert: {e}"))
+            });
+        slot.lock().unwrap().push((tag, result));
     });
 }
 
@@ -1198,6 +1368,17 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     .map(|a| (Some(a.browser_download_url.clone()), Some(a.size)))
                     .unwrap_or((None, None));
                 let chromium_version = parse_chromium_version(&r.name);
+                // Persist tag metadata so brackets that point at tags
+                // outside the currently-fetched window can still find a
+                // pinned Chromium version + date. Best-effort: any sqlite
+                // error is silently ignored — this is just a fallback
+                // cache, not authoritative.
+                let _ = verdict::upsert_tag_metadata(
+                    &r.tag,
+                    chromium_version.as_deref(),
+                    Some(&r.published_at),
+                    Some(&channel),
+                );
                 let mut row = ReleaseRow {
                     tag: r.tag,
                     published_at: r.published_at,

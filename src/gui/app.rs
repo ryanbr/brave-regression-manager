@@ -248,6 +248,21 @@ impl App {
                 }
             }
         }
+        let tag_drained: Vec<_> = std::mem::take(
+            &mut *self.state.slots.tag_metadata_done.lock().unwrap());
+        for (tag, res) in tag_drained {
+            self.state.tag_fetch_pending.remove(&tag);
+            match res {
+                Ok(()) => {
+                    console::info(&self.state.console, "tag-meta",
+                        format!("fetched metadata for {tag}"));
+                }
+                Err(e) => {
+                    console::error(&self.state.console, "tag-meta",
+                        format!("[{tag}] {e}"));
+                }
+            }
+        }
         if let Some(res) = self.state.slots.apply_done.lock().unwrap().take() {
             self.state.applying = false;
             match res {
@@ -290,6 +305,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if self.state.fetching_releases || self.state.seeding || self.state.applying
             || !self.state.compare_loading.is_empty()
+            || !self.state.tag_fetch_pending.is_empty()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         } else if !self.state.running.is_empty() {

@@ -418,6 +418,36 @@ pub struct CompareResult {
     pub truncated: bool,
 }
 
+/// One-shot per-tag fetch of `brave/brave-browser` release metadata so the
+/// GUI can populate the pinned Chromium version + date for an installed
+/// tag that isn't in the currently-loaded available window. Single API
+/// call; far cheaper than expanding the global fetch window. Returns
+/// `(name, published_at, prerelease)` — only the bits we care about.
+pub async fn fetch_release_metadata(tag: &str, token: Option<&str>)
+    -> Result<(String, String, bool)>
+{
+    let url = format!("https://api.github.com/repos/{OWNER}/{REPO}/releases/tags/{tag}");
+    let mut req = reqwest::Client::builder()
+        .user_agent("brave-regress")
+        .build()?
+        .get(&url)
+        .header("Accept", "application/vnd.github+json");
+    let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
+    if let Some(t) = chosen {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("github release {tag}: HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await?;
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let published = body.get("published_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let prerelease = body.get("prerelease").and_then(|v| v.as_bool()).unwrap_or(false);
+    Ok((name, published, prerelease))
+}
+
 /// Fetch the commit list between two refs in `brave/brave-core` via the
 /// REST `compare` endpoint. Token-aware to dodge anonymous rate limits.
 pub async fn compare_commits(base: &str, head: &str, token: Option<&str>) -> Result<CompareResult> {
