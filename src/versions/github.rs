@@ -318,7 +318,20 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
         zip_clean(n) && is_windows_zip(n)
             && (n.contains("arm64") || n.contains("aarch64"))
     };
-    let zip_any = |n: &str| -> bool { zip_clean(n) && is_windows_zip(n) };
+    // `zip_any` is the fallback for windows zips with no architecture
+    // marker. Critically, it must EXCLUDE the opposite architecture —
+    // otherwise on x64 Windows we'd happily pick `*-win-arm64.zip` and
+    // the user gets `ERROR_EXE_MACHINE_TYPE_MISMATCH` (os error 216)
+    // when launching, since an ARM PE can't run on x64 Windows.
+    let zip_any = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        zip_clean(n) && is_windows_zip(n)
+            && if want_arm {
+                !(l.contains("x64") || l.contains("amd64"))
+            } else {
+                !(l.contains("arm64") || l.contains("aarch64") || l.contains("-arm"))
+            }
+    };
 
     let silent_standalone_x64 = |n: &str| -> bool {
         exe_ok(n) && n.contains("Standalone") && n.contains("Silent")
@@ -337,9 +350,22 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
             && n.to_lowercase().contains("arm")
     };
 
-    let order: [&dyn Fn(&str) -> bool; 5] = if want_arm
-        { [&zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm, &zip_x64] }
-        else { [&zip_x64, &zip_any, &silent_standalone_x64, &standalone_x64, &zip_arm] };
+    // Cross-arch fallback rules: Windows 11 on ARM can emulate x64, but
+    // x64 Windows has no ARM emulator — running an ARM PE on x64 fails
+    // with ERROR_EXE_MACHINE_TYPE_MISMATCH (216). So the order must
+    // never end in zip_arm/standalone_arm for an x64 host. If Brave
+    // didn't ship an x64 build for that tag (some recent nightlies
+    // shipped arm-only), return None — surfaces as "no installer" in
+    // the GUI rather than silently installing an unrunnable binary.
+    let order: Vec<&dyn Fn(&str) -> bool> = if want_arm {
+        // ARM host: prefer arm, then any-arch zip, then arm exe;
+        // finally fall back to x64 (works under Win11-on-ARM emu).
+        vec![&zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm,
+             &zip_x64, &silent_standalone_x64, &standalone_x64]
+    } else {
+        // x64 host: x64 only. No cross-arch fallback.
+        vec![&zip_x64, &zip_any, &silent_standalone_x64, &standalone_x64]
+    };
     for matcher in order {
         if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
     }

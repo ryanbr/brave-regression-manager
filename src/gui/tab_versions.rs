@@ -635,8 +635,88 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         if v.is_empty() { "Nightly".to_string() } else { v.join(" + ") }
     };
     let avail_heading_size = egui::TextStyle::Body.resolve(ui.style()).size + 2.0;
-    ui.label(RichText::new(format!("Available on GitHub ({chans})"))
-        .strong().size(avail_heading_size));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("Available on GitHub ({chans})"))
+            .strong().size(avail_heading_size));
+        // Right-aligned Clear menu — drops down with two destructive
+        // actions: wipe every verdict, or wipe every comment. Each
+        // targets a distinct sqlite table so the user can clear one
+        // without touching the other.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui|
+        {
+            ui.menu_button("Clear v", |ui| {
+                if ui.button("Verdicts")
+                    .on_hover_text(
+                        "Wipe every per-tag verdict (GOOD / BAD / BUGGY / \
+                         UNSURE / NEW). Notes, launch args, and per-tag \
+                         profile dirs are not affected.")
+                    .clicked()
+                {
+                    match verdict::clear_all_version_verdicts() {
+                        Ok(n) => {
+                            crate::console::info(&state.console, "verdict",
+                                format!("cleared {n} verdict row(s)"));
+                            state.status_msg = format!("cleared {n} verdict(s)");
+                        }
+                        Err(e) => {
+                            crate::console::error(&state.console, "verdict",
+                                format!("clear failed: {e:#}"));
+                            state.status_msg = format!("clear failed: {e}");
+                        }
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Comments")
+                    .on_hover_text(
+                        "Wipe every per-tag note. Verdicts, launch args, \
+                         and per-tag profile dirs are not affected.")
+                    .clicked()
+                {
+                    match verdict::clear_all_notes() {
+                        Ok(n) => {
+                            crate::console::info(&state.console, "verdict",
+                                format!("cleared {n} note row(s)"));
+                            state.status_msg = format!("cleared {n} note(s)");
+                        }
+                        Err(e) => {
+                            crate::console::error(&state.console, "verdict",
+                                format!("clear notes failed: {e:#}"));
+                            state.status_msg = format!("clear failed: {e}");
+                        }
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Remove Cached files")
+                    .on_hover_text(
+                        "Delete every downloaded installer asset under \
+                         cache/downloads/. Already-installed Brave versions \
+                         are not affected — only the on-disk archives that \
+                         the [cached] / Install (cached) shortcut uses.")
+                    .clicked()
+                {
+                    match remove_cached_downloads() {
+                        Ok((n, bytes)) => {
+                            // Refresh `cached` flags on the in-memory rows
+                            // so the [cached] pill / "Install (cached)"
+                            // label disappear next frame.
+                            for r in &mut state.available { r.refresh_cached(); }
+                            let mb = bytes as f64 / 1_048_576.0;
+                            crate::console::info(&state.console, "cache",
+                                format!("removed {n} file(s), freed {mb:.1} MiB"));
+                            state.status_msg = format!(
+                                "removed {n} cached file(s) ({mb:.1} MiB)");
+                        }
+                        Err(e) => {
+                            crate::console::error(&state.console, "cache",
+                                format!("remove cached files failed: {e:#}"));
+                            state.status_msg = format!("remove failed: {e}");
+                        }
+                    }
+                    ui.close_menu();
+                }
+            });
+        });
+    });
 
     // Fill remaining vertical space so a tall window doesn't show a big
     // empty band below this panel.
@@ -912,9 +992,23 @@ fn render_status_cell(
                             ui.colored_label(Color32::from_rgb(140, 180, 220), "[cached]");
                         }
                         let btn_label = if r.cached { "Install (cached)" } else { "Install" };
-                        if ui.add_enabled(installing_now.is_none(),
-                                          egui::Button::new(btn_label)).clicked()
-                        {
+                        // Defensive arch check: a stale releases.json (cache
+                        // populated by the old, broken Windows picker) can
+                        // still hold a wrong-arch asset URL even after the
+                        // picker is fixed. Refuse to install — and show a
+                        // helpful tooltip — when the host_asset name is
+                        // obviously the opposite architecture from the host.
+                        let arch_mismatch = is_opposite_arch_asset(name);
+                        let btn_resp = ui.add_enabled(
+                            installing_now.is_none() && !arch_mismatch,
+                            egui::Button::new(btn_label));
+                        let btn_resp = if arch_mismatch {
+                            btn_resp.on_disabled_hover_text(
+                                "Cached asset URL is the wrong architecture for \
+                                 this host. Click 'Fetch GitHub releases' to \
+                                 refresh the cache, then re-install.")
+                        } else { btn_resp };
+                        if btn_resp.clicked() {
                             state.installing = Some(r.tag.clone());
                             state.status_msg = format!("installing {}…", r.tag);
                             let slot     = state.slots.install_done.clone();
@@ -1705,6 +1799,52 @@ fn truncate_path(full: &str, max_chars: usize) -> String {
     } else {
         format!("…{sep}{acc}")
     }
+}
+
+/// True when `asset_name` clearly targets the opposite CPU architecture
+/// of the running host — used to defend against a stale releases.json
+/// cache where the OLD Windows picker selected an arm64 zip on an x64
+/// host. Conservative: only flags names with explicit arm/x64 markers.
+fn is_opposite_arch_asset(asset_name: &str) -> bool {
+    let l = asset_name.to_lowercase();
+    let host_arch = std::env::consts::ARCH;
+    let host_arm = host_arch == "aarch64";
+    let asset_arm = l.contains("arm64") || l.contains("aarch64") || l.contains("-arm");
+    let asset_x64 = (l.contains("x64") || l.contains("amd64")) && !asset_arm;
+    if host_arm { asset_x64 } else { asset_arm }
+}
+
+/// Wipe every file in `cache/downloads/`. Returns `(file_count, bytes)`
+/// for the status-bar summary. Subdirectories are recursed; the
+/// downloads dir itself is preserved (re-creating it would fight with
+/// `paths::ensure_dirs()` on the next install).
+fn remove_cached_downloads() -> std::io::Result<(usize, u64)> {
+    let dir = crate::paths::downloads_dir();
+    if !dir.exists() { return Ok((0, 0)); }
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        let md = entry.metadata()?;
+        if md.is_dir() {
+            // Walk the subtree to tally bytes before removing.
+            for sub in walkdir::WalkDir::new(&p) {
+                if let Ok(s) = sub {
+                    if s.file_type().is_file() {
+                        bytes += s.metadata().map(|m| m.len()).unwrap_or(0);
+                        count += 1;
+                    }
+                }
+            }
+            std::fs::remove_dir_all(&p)?;
+        } else {
+            bytes += md.len();
+            count += 1;
+            std::fs::remove_file(&p)?;
+        }
+    }
+    Ok((count, bytes))
 }
 
 fn open_in_explorer(path: &std::path::Path) {
