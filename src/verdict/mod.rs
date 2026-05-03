@@ -266,6 +266,23 @@ pub fn list_version_verdicts() -> Result<Vec<VersionVerdict>> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// Wipe every row from `version_verdict` — used by the GUI's
+/// Clear → Verdicts menu. Returns the count of deleted rows so the
+/// GUI can show a summary in the status bar.
+pub fn clear_all_version_verdicts() -> Result<usize> {
+    let conn = open()?;
+    let n = conn.execute("DELETE FROM version_verdict", [])?;
+    Ok(n)
+}
+
+/// Wipe every row from `notes` — used by the GUI's Clear → Comments
+/// menu. Returns the deleted-row count.
+pub fn clear_all_notes() -> Result<usize> {
+    let conn = open()?;
+    let n = conn.execute("DELETE FROM notes", [])?;
+    Ok(n)
+}
+
 pub fn version_verdict(tag: &str) -> Result<Verdict> {
     let conn = open()?;
     let v: Option<String> = conn.query_row(
