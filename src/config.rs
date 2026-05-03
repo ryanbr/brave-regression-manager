@@ -46,6 +46,12 @@ pub struct Gui {
     /// by default.
     #[serde(default)] pub default_args_enabled: bool,
     #[serde(default)] pub default_args:         String,
+    /// When true, every Launch / Apply & Launch creates a fresh
+    /// throwaway profile dir under `<data-root>/profiles/throwaway-…`
+    /// instead of reusing the selected profile. Use this to dodge
+    /// state-corrupted profiles when bisecting regressions. Off by
+    /// default; ignored when a per-row user_data_dir is set.
+    #[serde(default)] pub clean_profile_per_launch: bool,
 }
 
 fn default_true() -> bool { true }
@@ -69,6 +75,7 @@ impl Default for Gui {
             default_profile_dir: String::new(),
             default_args_enabled: false,
             default_args: String::new(),
+            clean_profile_per_launch: false,
         }
     }
 }

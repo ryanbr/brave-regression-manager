@@ -102,13 +102,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             }
         }
 
-        // Date filter changed: only refetch when the new window asks for
-        // releases *older* than anything currently cached. Narrowing the
-        // range (or shifting forward in time) is a pure client-side
-        // filter — re-rendering the existing rows is instant and free,
-        // no API call needed. Until the user clicks "Fetch GitHub
-        // releases" again, the in-memory cache is treated as the source
-        // of truth for everything inside its date span.
+        // Date filter changed: refetch when the new window asks for
+        // releases *older* than anything currently cached, OR when the
+        // cache itself is stale (Brave nightlies land multiple times a
+        // day, so a cache more than 10 minutes old can be missing the
+        // latest). Pure-narrowing within a fresh cache is still served
+        // from memory — instant, no API call.
         let date_changed  = state.date_from != prev_from || state.date_to != prev_to;
         let filter_active = state.date_from.is_some() || state.date_to.is_some();
         if date_changed && filter_active
@@ -120,10 +119,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .min();
             let needs_older = match (state.date_from, oldest_cached) {
                 (Some(want), Some(have)) => want < have,
-                (Some(_),    None)       => true,  // empty cache, fetch
+                (Some(_),    None)       => true,
                 _                        => false,
             };
-            if needs_older {
+            let cache_stale = state.available_fetched_at
+                .map(|t| (chrono::Utc::now() - t).num_minutes() >= 10)
+                .unwrap_or(true);
+            if needs_older || cache_stale {
                 spawn_fetch(state);
             }
         }
@@ -322,6 +324,27 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
                 ui.end_row();
 
+                ui.label("Clean profile per launch:").on_hover_text(
+                    "Use a fresh, unique --user-data-dir on every Launch / \
+                     Apply & Launch instead of reusing the selected profile. \
+                     Useful when bisecting regressions where the existing \
+                     profile state may itself be the culprit. Per-row \
+                     'Profile…' overrides still take precedence.");
+                ui.horizontal(|ui| {
+                    let prev = state.clean_profile_per_launch;
+                    ui.checkbox(&mut state.clean_profile_per_launch, "Enabled");
+                    if prev != state.clean_profile_per_launch {
+                        state.config_dirty = true;
+                        crate::console::info(&state.console, "config",
+                            if state.clean_profile_per_launch {
+                                "clean profile per launch: enabled".to_string()
+                            } else {
+                                "clean profile per launch: disabled".to_string()
+                            });
+                    }
+                });
+                ui.end_row();
+
                 ui.label("GitHub token:").on_hover_text(
                     "Optional — bumps anonymous 60 req/hr to 5,000 req/hr. \
                      https://github.com/settings/tokens (no scopes needed).");
@@ -462,6 +485,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         let per_row = verdict::user_data_dir(&v.tag);
                         if !per_row.is_empty() {
                             Some(std::path::PathBuf::from(per_row))
+                        } else if state.clean_profile_per_launch {
+                            Some(throwaway_profile_dir(&v.tag))
                         } else if state.default_profile_dir_enabled
                             && !state.default_profile_dir.is_empty()
                         {
@@ -1799,6 +1824,20 @@ fn truncate_path(full: &str, max_chars: usize) -> String {
     } else {
         format!("…{sep}{acc}")
     }
+}
+
+/// Build a unique throwaway --user-data-dir path under the standard
+/// profiles directory. Stamped with the tag and a UTC unix timestamp
+/// so concurrent launches don't collide and so the user can tell
+/// disposable profiles apart at a glance. Cleanup is the user's job
+/// (the GUI doesn't auto-purge — these can be useful for forensics
+/// after a crash).
+pub(crate) fn throwaway_profile_dir(tag: &str) -> std::path::PathBuf {
+    let stamp = chrono::Utc::now().timestamp();
+    let safe_tag: String = tag.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    crate::paths::profiles_dir().join(format!("throwaway-{safe_tag}-{stamp}"))
 }
 
 /// True when `asset_name` clearly targets the opposite CPU architecture

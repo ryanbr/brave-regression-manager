@@ -92,6 +92,7 @@ impl App {
         state.default_profile_dir         = cfg.gui.default_profile_dir.clone();
         state.default_args_enabled        = cfg.gui.default_args_enabled;
         state.default_args                = cfg.gui.default_args.clone();
+        state.clean_profile_per_launch    = cfg.gui.clean_profile_per_launch;
         // Guard against an all-off persisted state — default back to Nightly.
         if !state.channel_release && !state.channel_beta && !state.channel_nightly {
             state.channel_nightly = true;
@@ -137,6 +138,7 @@ impl App {
         cfg.gui.default_profile_dir         = self.state.default_profile_dir.clone();
         cfg.gui.default_args_enabled        = self.state.default_args_enabled;
         cfg.gui.default_args                = self.state.default_args.clone();
+        cfg.gui.clean_profile_per_launch    = self.state.clean_profile_per_launch;
         if let Err(e) = cfg.save(&paths::config_path()) {
             self.state.status_msg = format!("settings save failed: {e}");
         }

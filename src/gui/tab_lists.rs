@@ -92,6 +92,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     let per_row = crate::verdict::user_data_dir(&tag);
                     if !per_row.is_empty() {
                         Some(std::path::PathBuf::from(per_row))
+                    } else if state.clean_profile_per_launch {
+                        Some(super::tab_versions::throwaway_profile_dir(&tag))
                     } else if state.default_profile_dir_enabled
                         && !state.default_profile_dir.is_empty()
                     {
