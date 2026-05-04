@@ -1328,7 +1328,16 @@ fn render_status_cell(
                         } else { btn_resp };
                         if btn_resp.clicked() {
                             state.installing = Some(r.tag.clone());
+                            state.installing_started = Some(std::time::Instant::now());
                             state.status_msg = format!("installing {}…", r.tag);
+                            // Pre-install summary — confirms which asset is
+                            // being pulled + the URL (copy-pasteable for
+                            // manual retry if the in-app fetch fails).
+                            let mb = r.asset_size.unwrap_or(0) as f64 / 1_048_576.0;
+                            crate::console::info(&state.console, "install", format!(
+                                "{}: {} ({:.1} MiB, cached={}) — {}",
+                                r.tag, name, mb, r.cached,
+                                r.asset_url.as_deref().unwrap_or("(no url)")));
                             let slot     = state.slots.install_done.clone();
                             let progress = state.slots.install_progress.clone();
                             *progress.lock().unwrap() = None;
@@ -1336,11 +1345,12 @@ fn render_status_cell(
                             let name2    = name.clone();
                             let url      = r.asset_url.clone();
                             let size     = r.asset_size;
+                            let cons     = state.console.clone();
                             state.rt.spawn(async move {
                                 let result = match (url, size) {
                                     (Some(u), Some(s)) =>
-                                        versions::install::install_tag_with_asset(
-                                            &tag2, &name2, &u, s, Some(progress)).await,
+                                        versions::install::install_tag_with_asset_console(
+                                            &tag2, &name2, &u, s, Some(progress), Some(cons)).await,
                                     _ =>
                                         versions::install::install_tag_with_progress(
                                             &tag2, Some(progress)).await,

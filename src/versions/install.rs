@@ -64,8 +64,29 @@ pub async fn install_tag_with_asset(
     tag: &str, asset_name: &str, asset_url: &str, asset_size: u64,
     sink: Option<ProgressSink>,
 ) -> Result<PathBuf> {
+    install_tag_with_asset_console(tag, asset_name, asset_url, asset_size, sink, None).await
+}
+
+/// Same as `install_tag_with_asset` but also emits per-phase progress
+/// to the GUI Console when a handle is supplied. Lets the user see
+/// download→extract→flatten transitions instead of a black box.
+pub async fn install_tag_with_asset_console(
+    tag: &str, asset_name: &str, asset_url: &str, asset_size: u64,
+    sink: Option<ProgressSink>,
+    console: Option<crate::console::Handle>,
+) -> Result<PathBuf> {
     paths::ensure_dirs()?;
     let download_path = paths::downloads_dir().join(asset_name);
+    let cached = std::fs::metadata(&download_path).map(|m| m.len() == asset_size).unwrap_or(false);
+    if let Some(c) = &console {
+        if cached {
+            crate::console::info(c, "install",
+                format!("{tag}: phase=skip-download (cache hit, {asset_name})"));
+        } else {
+            crate::console::info(c, "install",
+                format!("{tag}: phase=download {asset_name}"));
+        }
+    }
     download(asset_url, &download_path, asset_size, tag, asset_name, sink.clone()).await?;
     if let Some(s) = &sink { *s.lock().unwrap() = None; }
 
@@ -73,6 +94,10 @@ pub async fn install_tag_with_asset(
     if dest.exists() { std::fs::remove_dir_all(&dest)?; }
     std::fs::create_dir_all(&dest)?;
 
+    if let Some(c) = &console {
+        crate::console::info(c, "install",
+            format!("{tag}: phase=extract → {}", dest.display()));
+    }
     extract(&download_path, &dest)
         .with_context(|| format!("extracting {} → {}", download_path.display(), dest.display()))?;
 

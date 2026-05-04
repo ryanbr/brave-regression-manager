@@ -68,6 +68,44 @@ pub struct App {
     initial_size_applied: bool,
 }
 
+/// Pattern-match install-failure messages and return a short
+/// actionable hint when we recognise one. Returns None otherwise —
+/// the raw error stays visible either way.
+fn install_failure_hint(raw: &str) -> Option<&'static str> {
+    let lc = raw.to_lowercase();
+    if lc.contains("403") {
+        return Some("GitHub rate limit. Paste a personal access token \
+                     in Settings → GitHub token to bump the anonymous \
+                     60 req/hr cap to 5000 req/hr.");
+    }
+    if lc.contains("404") {
+        return Some("asset URL stale (release was edited / asset \
+                     re-uploaded). Click 'Fetch GitHub releases' to \
+                     refresh the cached URL, then re-install.");
+    }
+    if lc.contains("503") || lc.contains("502") || lc.contains("504") {
+        return Some("transient GitHub / S3 outage. Retry shortly — \
+                     downloads resume from the .part file via HTTP Range.");
+    }
+    if lc.contains("os error 28") || lc.contains("no space left") {
+        return Some("disk full. Free up space under <data-root>/cache/ \
+                     or <data-root>/versions/ (Clear → Remove Cached \
+                     files wipes downloaded archives).");
+    }
+    if lc.contains("os error 5") || lc.contains("permission denied") {
+        return Some("permission denied writing to the install or cache \
+                     dir. Check that <data-root> isn't read-only and \
+                     that an antivirus isn't holding open files.");
+    }
+    if lc.contains("brave binary not found") {
+        return Some("the asset extracted but didn't yield a brave \
+                     executable. The asset may be a debug-symbols \
+                     archive or a wrong-arch package — re-fetch GitHub \
+                     releases and try again.");
+    }
+    None
+}
+
 impl App {
     pub fn new(_cc: &CreationContext<'_>, rt: Handle) -> Self {
         let _ = paths::ensure_dirs();
@@ -251,21 +289,28 @@ impl App {
             }
         }
         if let Some(res) = self.state.slots.install_done.lock().unwrap().take() {
+            let elapsed = self.state.installing_started.take()
+                .map(|t| format!(" in {:.1}s", t.elapsed().as_secs_f64()))
+                .unwrap_or_default();
             self.state.installing = None;
             match res {
                 Ok(p)  => {
-                    let msg = format!("installed → {p}");
+                    let msg = format!("installed{elapsed} → {p}");
                     console::info(&self.state.console, "install", &msg);
                     self.state.status_msg = msg;
                     self.state.installed = crate::versions::list_installed().unwrap_or_default();
-                    // After a successful install the cached file definitely
-                    // exists on disk; refresh every row's marker so the GUI
-                    // reflects reality.
                     for r in &mut self.state.available { r.refresh_cached(); }
                 }
                 Err(e) => {
-                    console::error(&self.state.console, "install", &e);
-                    self.state.status_msg = format!("install failed: {e}");
+                    // Append an actionable hint when the OS error or
+                    // GitHub HTTP code matches a pattern we recognise.
+                    let hint = install_failure_hint(&e);
+                    let msg = match hint {
+                        Some(h) => format!("{e}\nhint: {h}"),
+                        None    => e.clone(),
+                    };
+                    console::error(&self.state.console, "install", &msg);
+                    self.state.status_msg = format!("install failed{elapsed}: {e}");
                 }
             }
         }

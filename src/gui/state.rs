@@ -182,6 +182,9 @@ pub struct AppState {
     pub launch_as_admin: bool,
     pub fetching_releases: bool,
     pub installing: Option<String>,
+    /// Wall-clock at install spawn — used by the install-completion
+    /// drain to format a "in N.Ns" duration in the post-install line.
+    pub installing_started: Option<std::time::Instant>,
     pub selected_tag: Option<String>,
 
     /// Sort column + direction for the Available list. Session-only —
@@ -286,6 +289,7 @@ impl AppState {
             launch_as_admin: false,
             fetching_releases: false,
             installing: None,
+            installing_started: None,
             selected_tag: None,
             avail_sort_by:  AvailSortColumn::Date,
             avail_sort_asc: false,
