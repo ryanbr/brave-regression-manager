@@ -68,6 +68,41 @@ pub struct App {
     initial_size_applied: bool,
 }
 
+/// Pattern-match GitHub-fetch failure messages and return a short
+/// actionable hint when we recognise one. Same shape as the install /
+/// launch hint helpers — purely additive context, the raw error
+/// stays visible either way.
+fn fetch_failure_hint(raw: &str) -> Option<&'static str> {
+    let lc = raw.to_lowercase();
+    if lc.contains("403") || lc.contains("rate limit") {
+        return Some("GitHub rate limit hit. Paste a personal access \
+                     token in Settings → GitHub token (no scopes \
+                     needed) to bump the anonymous 60 req/hr cap to \
+                     5000 req/hr.");
+    }
+    if lc.contains("404") {
+        return Some("repository or release path not found — likely a \
+                     transient GitHub issue, retry shortly.");
+    }
+    if lc.contains("503") || lc.contains("502") || lc.contains("504") {
+        return Some("transient GitHub outage. Retry shortly.");
+    }
+    if lc.contains("dns")
+        || lc.contains("connection refused")
+        || lc.contains("network is unreachable")
+        || lc.contains("os error 11001") /* WSAHOST_NOT_FOUND */
+    {
+        return Some("network unreachable. Check connectivity and any \
+                     firewall / VPN that might be blocking api.github.com.");
+    }
+    if lc.contains("certificate") || lc.contains("tls") {
+        return Some("TLS handshake failed. Check the system clock \
+                     (out-of-sync clocks reject GitHub's cert) and \
+                     any corporate-proxy MITM cert handling.");
+    }
+    None
+}
+
 /// Pattern-match install-failure messages and return a short
 /// actionable hint when we recognise one. Returns None otherwise —
 /// the raw error stays visible either way.
@@ -139,6 +174,45 @@ impl App {
         }
         state.installed = crate::versions::list_installed().unwrap_or_default();
         state.manual_release_tags = crate::verdict::manual_release_tags();
+
+        // Single-line settings summary at startup — confirms what got
+        // loaded so the user can sanity-check the persisted config.
+        // GitHub token is masked: we report present/absent + length
+        // (never the value) so the line is safe to share when
+        // troubleshooting.
+        let chans = {
+            let mut v: Vec<&str> = Vec::new();
+            if state.channel_release { v.push("Release"); }
+            if state.channel_beta    { v.push("Beta"); }
+            if state.channel_nightly { v.push("Nightly"); }
+            v.join("+")
+        };
+        let token_str = if state.github_token.is_empty() { "absent".to_string() }
+            else { format!("present ({} chars)", state.github_token.len()) };
+        let date_filter = format!("{}..{}",
+            state.date_from.map(|d| d.to_string()).unwrap_or_else(|| "(none)".into()),
+            state.date_to  .map(|d| d.to_string()).unwrap_or_else(|| "(none)".into()));
+        let prof_dir = if state.default_profile_dir_enabled
+            && !state.default_profile_dir.is_empty()
+        { format!("on ({})", state.default_profile_dir) }
+        else if state.default_profile_dir_enabled { "on (empty)".to_string() }
+        else { "off".to_string() };
+        let def_args = if state.default_args_enabled
+            && !state.default_args.is_empty()
+        { format!("on ({})", state.default_args) }
+        else if state.default_args_enabled { "on (empty)".to_string() }
+        else { "off".to_string() };
+        console::info(&state.console, "settings", format!(
+            "theme={}  channels={}  release_count={}  date={}  \
+             log_level={:?}  freeze_components={}  \
+             default_profile_folder={}  default_args={}  \
+             clean_profile_per_launch={}  incremental_release_cache={}  \
+             launch_as_admin={}  github_token={}",
+            state.theme, chans, state.release_count, date_filter,
+            state.brave_log_level, state.freeze_components,
+            prof_dir, def_args,
+            state.clean_profile_per_launch, state.incremental_release_cache,
+            state.launch_as_admin, token_str));
         // Restore the on-disk releases cache so installs can go direct to S3
         // immediately on launch without re-querying the GitHub API.
         if let Some(cache) = ReleaseCache::load() {
@@ -272,7 +346,11 @@ impl App {
                         rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                     }
                     let installable = rows.iter().filter(|r| r.host_asset.is_some()).count();
-                    let msg = format!("fetched {} tags ({installable} installable on this platform)", rows.len());
+                    let elapsed = self.state.fetching_started.take()
+                        .map(|t| format!(" in {:.1}s", t.elapsed().as_secs_f64()))
+                        .unwrap_or_default();
+                    let msg = format!("fetched {} tags{elapsed} ({installable} installable on this platform)",
+                        rows.len());
                     console::info(&self.state.console, "github", &msg);
                     self.state.status_msg = msg;
                     if let Err(e) = ReleaseCache::save(&rows) {
@@ -283,8 +361,16 @@ impl App {
                     self.state.available_fetched_at = Some(chrono::Utc::now());
                 }
                 Err(e) => {
-                    console::error(&self.state.console, "github", &e);
-                    self.state.status_msg = format!("github error: {e}");
+                    let elapsed = self.state.fetching_started.take()
+                        .map(|t| format!(" after {:.1}s", t.elapsed().as_secs_f64()))
+                        .unwrap_or_default();
+                    let hint = fetch_failure_hint(&e);
+                    let msg = match hint {
+                        Some(h) => format!("{e}\nhint: {h}"),
+                        None    => e.clone(),
+                    };
+                    console::error(&self.state.console, "github", &msg);
+                    self.state.status_msg = format!("github error{elapsed}: {e}");
                 }
             }
         }

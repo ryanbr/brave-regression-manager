@@ -181,6 +181,10 @@ pub struct AppState {
     pub incremental_release_cache: bool,
     pub launch_as_admin: bool,
     pub fetching_releases: bool,
+    /// Wall-clock at fetch spawn — the success/error drain formats a
+    /// "in N.Ns" suffix on the completion line so the user can see how
+    /// long the GitHub walk took. Cleared in the drain.
+    pub fetching_started: Option<std::time::Instant>,
     pub installing: Option<String>,
     /// Wall-clock at install spawn — used by the install-completion
     /// drain to format a "in N.Ns" duration in the post-install line.
@@ -288,6 +292,7 @@ impl AppState {
             incremental_release_cache: true,
             launch_as_admin: false,
             fetching_releases: false,
+            fetching_started: None,
             installing: None,
             installing_started: None,
             selected_tag: None,

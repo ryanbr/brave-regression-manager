@@ -79,6 +79,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // `2021..=current_year` and Jan..Dec respectively. The user
         // *cannot* select pre-2021 because those years aren't in the
         // dropdown at all.
+        let prev_from = state.date_from;
+        let prev_to   = state.date_to;
         ym_combo(ui, "date_from", &mut state.date_from, today,
                  EndOfMonth::Start, &mut state.config_dirty);
         ui.label("to:");
@@ -91,6 +93,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             state.date_from = None;
             state.date_to   = None;
             state.config_dirty = true;
+            crate::console::info(&state.console, "filter",
+                "date filter cleared");
         }
         // Preset clicks are an explicit single-action intent — auto-fetch
         // is fine here. The from/to combos are NOT auto-fetched: picking
@@ -98,14 +102,31 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // January of that year before the user got to the month combo.
         // The user can still trigger a fetch via the explicit "Fetch
         // GitHub releases" button after editing the combos.
-        let mut preset_clicked = false;
+        let mut preset_clicked: Option<&str> = None;
         for (label, days) in [("7d", 7i64), ("30d", 30), ("60d", 60), ("90d", 90), ("120d", 120), ("150d", 150)] {
             if ui.small_button(label).clicked() {
                 state.date_to   = Some(today);
                 state.date_from = Some(clamp_date(today - chrono::Duration::days(days)));
                 state.config_dirty = true;
-                preset_clicked = true;
+                preset_clicked = Some(label);
             }
+        }
+        // Echo any date-filter change to the Console — preset name when
+        // a quick-button was used, "custom" otherwise (year/month combo
+        // edit). Useful when a fetch is misbehaving and you want to
+        // confirm what filter the GUI thinks is active.
+        let from_changed = state.date_from != prev_from;
+        let to_changed   = state.date_to   != prev_to;
+        if from_changed || to_changed {
+            let fmt_d = |d: Option<chrono::NaiveDate>|
+                d.map(|d| d.to_string()).unwrap_or_else(|| "(none)".to_string());
+            let src = preset_clicked.map(|p| format!("preset {p}"))
+                .unwrap_or_else(|| "custom".to_string());
+            crate::console::info(&state.console, "filter", format!(
+                "date range {} ({} -> {} | {} -> {})",
+                src,
+                fmt_d(prev_from), fmt_d(state.date_from),
+                fmt_d(prev_to),   fmt_d(state.date_to)));
         }
 
         // Auto-refetch only fires for preset clicks. Refetch when the
@@ -113,7 +134,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // currently cached, OR when the cache is stale (>10 min — Brave
         // nightlies land multiple times a day).
         let filter_active = state.date_from.is_some() || state.date_to.is_some();
-        if preset_clicked && filter_active
+        if preset_clicked.is_some() && filter_active
             && !state.available.is_empty() && !state.fetching_releases
         {
             let oldest_cached = state.available.iter()
@@ -756,11 +777,25 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     open_in_explorer(&v.folder);
                 }
                 if ui.button("Del").on_hover_text("Uninstall (remove version folder)").clicked() {
-                    if let Err(e) = std::fs::remove_dir_all(&v.folder) {
-                        state.status_msg = format!("uninstall failed: {e}");
-                    } else {
-                        state.installed = versions::list_installed().unwrap_or_default();
-                        state.status_msg = format!("uninstalled {}", v.tag);
+                    let folder = v.folder.clone();
+                    let tag = v.tag.clone();
+                    crate::console::info(&state.console, "uninstall",
+                        format!("removing {tag} → {}", folder.display()));
+                    let started = std::time::Instant::now();
+                    match std::fs::remove_dir_all(&folder) {
+                        Ok(()) => {
+                            state.installed = versions::list_installed().unwrap_or_default();
+                            let secs = started.elapsed().as_secs_f64();
+                            crate::console::info(&state.console, "uninstall",
+                                format!("uninstalled {tag} in {secs:.1}s"));
+                            state.status_msg = format!("uninstalled {tag}");
+                        }
+                        Err(e) => {
+                            crate::console::error(&state.console, "uninstall",
+                                format!("{tag}: {e:#}  (folder still on disk; \
+                                 close any open files / processes and retry)"));
+                            state.status_msg = format!("uninstall failed: {e}");
+                        }
                     }
                 }
             });
@@ -1191,35 +1226,51 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             .clicked()
                         {
                             let tag = r.tag.clone();
-                            // Stop a running Brave for this tag first so
-                            // we can remove the version dir without a
-                            // file-in-use error on Windows.
+                            let dir = crate::paths::version_dir(&tag);
+                            let was_installed = dir.exists();
+                            let was_running   = state.running.contains_key(&tag);
+                            // Pre-action echo so the user sees what
+                            // they're about to do (and we can later
+                            // diagnose a failure mid-sequence).
+                            crate::console::info(&state.console, "manual", format!(
+                                "removing manual tag {tag} \
+                                 (installed={was_installed}, running={was_running})"));
+
                             if let Some(mut running) = state.running.remove(&tag) {
-                                versions::launch::force_kill_tree(running.child.id());
+                                let pid = running.child.id();
+                                versions::launch::force_kill_tree(pid);
                                 let _ = running.child.kill();
                                 let _ = running.child.wait();
+                                crate::console::info(&state.console, "manual",
+                                    format!("  • killed running Brave (pid {pid})"));
                             }
-                            // Uninstall the on-disk version if present.
-                            let dir = crate::paths::version_dir(&tag);
+
                             let mut uninstall_note = String::new();
-                            if dir.exists() {
-                                if let Err(e) = std::fs::remove_dir_all(&dir) {
-                                    uninstall_note = format!(" (uninstall failed: {e})");
-                                    crate::console::error(&state.console, "uninstall",
-                                        format!("{tag}: {e:#}"));
-                                } else {
-                                    uninstall_note = " + uninstalled".to_string();
-                                    state.installed = versions::list_installed()
-                                        .unwrap_or_default();
+                            if was_installed {
+                                match std::fs::remove_dir_all(&dir) {
+                                    Ok(()) => {
+                                        uninstall_note = " + uninstalled".to_string();
+                                        state.installed = versions::list_installed()
+                                            .unwrap_or_default();
+                                        crate::console::info(&state.console, "manual",
+                                            format!("  • uninstalled {}", dir.display()));
+                                    }
+                                    Err(e) => {
+                                        uninstall_note = format!(" (uninstall failed: {e})");
+                                        crate::console::error(&state.console, "uninstall",
+                                            format!("{tag}: {e:#}"));
+                                    }
                                 }
                             }
                             state.manual_release_tags.remove(&tag);
                             state.available.retain(|x| x.tag != tag);
                             if let Err(e) = verdict::unmark_manual_release(&tag) {
                                 crate::console::error(&state.console, "manual",
-                                    format!("remove {tag} failed: {e:#}"));
+                                    format!("  • sqlite cleanup failed: {e:#}"));
                                 state.status_msg = format!("remove failed: {e}");
                             } else {
+                                crate::console::info(&state.console, "manual",
+                                    format!("  • dropped from manual_release_tags + release_cache"));
                                 crate::console::info(&state.console, "manual",
                                     format!("removed manual tag {tag}{uninstall_note}"));
                                 state.status_msg = format!("removed {tag}{uninstall_note}");
@@ -1698,6 +1749,8 @@ fn render_compare_one(
 fn spawn_add_by_tag(state: &mut AppState, tag: String) {
     state.adding_by_tag = true;
     state.status_msg = format!("fetching release by tag: {tag}…");
+    crate::console::info(&state.console, "github",
+        format!("add-by-tag: fetching releases/tags/{tag} (single API call)"));
     let token = state.github_token.clone();
     let slot  = state.slots.add_by_tag_done.clone();
     let incremental = state.incremental_release_cache;
@@ -1800,6 +1853,7 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         state.release_count
     };
     state.fetching_releases = true;
+    state.fetching_started = Some(std::time::Instant::now());
     state.status_msg = if state.date_from.is_some() {
         format!("fetching tags back to {}…",
                 state.date_from.map(|d| d.to_string()).unwrap_or_default())
@@ -1808,6 +1862,26 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
     } else {
         format!("fetching {count} tags…")
     };
+    // Pre-fetch summary — confirms what we're about to walk and
+    // whether the request is going through anonymous (60 req/hr) or
+    // token-authenticated (5000 req/hr) GitHub API quota. Helps
+    // when troubleshooting slow / rate-limited fetches.
+    let chans_str = {
+        let mut v: Vec<&str> = Vec::new();
+        if state.channel_release { v.push("Release"); }
+        if state.channel_beta    { v.push("Beta"); }
+        if state.channel_nightly { v.push("Nightly"); }
+        if v.is_empty() { "Nightly".to_string() } else { v.join("+") }
+    };
+    let auth_str = if !state.github_token.is_empty() { "token (5000/hr)" }
+                   else                              { "anonymous (60/hr)" };
+    let stop_str = state.date_from.map(|d| format!("stop_at={d}"))
+        .unwrap_or_else(|| "no stop_at".to_string());
+    let inc_str = if state.incremental_release_cache { "incremental=on" }
+                  else                                { "incremental=off" };
+    crate::console::info(&state.console, "github", format!(
+        "fetch start: count<={count}  channels={chans_str}  {stop_str}  \
+         {inc_str}  auth={auth_str}"));
     // Snapshot the oldest cached release date so the async task can
     // decide whether incremental's known-tag short-circuit is safe to
     // apply (it isn't when the user is asking for something deeper
