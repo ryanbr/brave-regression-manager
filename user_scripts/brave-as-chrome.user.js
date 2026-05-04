@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Brave-as-Chrome (anti-fingerprint)
 // @namespace    https://github.com/ryanbr/twitch-brave-fix
-// @version      1.2.0
-// @description  Generalized derivative of TwitchAdSolutions' twitch-brave-fix that runs on every site. Hides navigator.brave (the canonical Brave detector — exposed even in Strict shields), rebrands navigator.userAgentData.brands / getHighEntropyValues so "Brave" becomes "Google Chrome", patches navigator.onLine to track real online/offline events instead of Brave's hardwired `false` (brave/brave-browser#38240), and fabricates a plausible navigator.connection (NetworkInformation) object so sites checking `if (navigator.connection)` no longer see Brave's `undefined` (brave/brave-browser#44985). Network-level header spoofs (Sec-Ch-Ua) are NOT applied here — those would require per-site GM_xmlHttpRequest retry logic and are tightly coupled to each site's failure signature; use the original Twitch-specific script for that case. This script is JS-surface only and safe to run globally.
+// @version      1.3.0
+// @description  Generalized derivative of TwitchAdSolutions' twitch-brave-fix that runs on every site. Hides navigator.brave (the canonical Brave detector — exposed even in Strict shields), rebrands navigator.userAgentData.brands / getHighEntropyValues so "Brave" becomes "Google Chrome", patches navigator.onLine to track real online/offline events instead of Brave's hardwired `false` (brave/brave-browser#38240), fabricates a plausible navigator.connection (NetworkInformation) object so sites checking `if (navigator.connection)` no longer see Brave's `undefined` (brave/brave-browser#44985), removes navigator.globalPrivacyControl (Brave-only, not in Chrome), and forces navigator.doNotTrack to null (Chrome's modern default) so DNT-checking sites don't flag the session. Network-level header spoofs (Sec-Ch-Ua) are NOT applied here — those would require per-site GM_xmlHttpRequest retry logic and are tightly coupled to each site's failure signature; use the original Twitch-specific script for that case. This script is JS-surface only and safe to run globally.
 // @author       https://github.com/ryanbr
 // @match        *://*/*
 // @run-at       document-start
@@ -127,5 +127,46 @@
                 configurable: true,
             });
         } catch (_e) { /* defineProperty rejected on some builds; nothing further to do */ }
+    }
+
+    // navigator.globalPrivacyControl is exposed on Brave's Navigator (returns true by default
+    // since Brave ships GPC enabled), but the property is NOT implemented in Chrome at all —
+    // `'globalPrivacyControl' in navigator` is false in Chrome. Sites detect Brave with either
+    // the value check (`navigator.globalPrivacyControl === true`) or the existence check
+    // (`'globalPrivacyControl' in navigator`). Mimic Chrome by removing the property from the
+    // prototype entirely; if non-configurable on this build, fall back to an instance-level
+    // undefined getter (defeats the value check at minimum).
+    if (_isBrave) {
+        try {
+            if ('globalPrivacyControl' in Navigator.prototype) {
+                const deleted = delete Navigator.prototype.globalPrivacyControl;
+                if (!deleted) {
+                    Object.defineProperty(navigator, 'globalPrivacyControl', {
+                        get: () => undefined,
+                        configurable: true,
+                    });
+                }
+            }
+        } catch (_e) {
+            try {
+                Object.defineProperty(navigator, 'globalPrivacyControl', {
+                    get: () => undefined,
+                    configurable: true,
+                });
+            } catch (_e2) { /* nothing further to try */ }
+        }
+    }
+
+    // navigator.doNotTrack defaults to "1" in Brave (DNT signal sent by default for privacy),
+    // but modern Chrome returns null (Chrome removed the user-facing DNT setting; default is
+    // null with no opt-in UI in current builds). Sites can use the difference as a Brave
+    // signal. Override to null so DNT-checking code doesn't flag the session.
+    if (_isBrave) {
+        try {
+            Object.defineProperty(navigator, 'doNotTrack', {
+                get: () => null,
+                configurable: true,
+            });
+        } catch (_e) { /* non-configurable on some builds */ }
     }
 })();
