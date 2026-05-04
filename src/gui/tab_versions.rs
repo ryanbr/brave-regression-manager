@@ -481,12 +481,15 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // Profile, verdict, args, Open, Del) still vary because Stop /
         // × only appear under certain conditions.
         const I_DOT:  f32 =  18.0;
-        const I_TAG:  f32 = 100.0;
-        // 330 absorbs the trailing empty space at the end of the row
-        // while still letting Open/Del land on-row in a default-width
-        // window. Long paths still truncate (`Label::truncate(true)`
-        // below), so anything wider just gets ellipsised.
-        const I_PATH: f32 = 330.0;
+        // Tag column tightened to 80 — `v1.91.119` is ~70 px so 100
+        // was leaving ~30 px of empty band between tag and path.
+        const I_TAG:  f32 =  80.0;
+        // Path column at 300 — fits the typical truncated path
+        // (`…\AppData\Local\brave-regress\versions\v1.91.119`) with a
+        // small breathing margin. Longer paths still truncate
+        // (`Label::truncate(true)`), and the row is tight enough that
+        // Open + Del stay on-row even when the Stop button appears.
+        const I_PATH: f32 = 315.0;
         for v in &installed {
             ui.horizontal(|ui| {
                 let verdict = verdict::version_verdict(&v.tag).unwrap_or(Verdict::Unknown);
