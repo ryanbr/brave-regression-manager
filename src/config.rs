@@ -61,6 +61,13 @@ pub struct Gui {
     /// strictly reduces GitHub API load with no downside for typical
     /// regression-bisection workflows.
     #[serde(default = "default_true")] pub incremental_release_cache: bool,
+    /// Launch Brave with Windows UAC elevation ("Run as administrator")
+    /// when true. Off by default. Ignored on non-Windows hosts. Note:
+    /// elevated launches go through `powershell Start-Process -Verb
+    /// RunAs`, so stderr-pipe and the per-row Stop force-kill don't
+    /// work for those launches — the spawned Child handle represents
+    /// the launcher, not Brave itself.
+    #[serde(default)] pub launch_as_admin: bool,
 }
 
 fn default_true() -> bool { true }
@@ -86,6 +93,7 @@ impl Default for Gui {
             default_args: String::new(),
             clean_profile_per_launch: false,
             incremental_release_cache: true,
+            launch_as_admin: false,
         }
     }
 }

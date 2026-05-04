@@ -102,7 +102,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         None
                     }
                 };
-                match versions::launch::launch_with_console(&tag, &prof, state.console.clone(), state.brave_log_level, state.freeze_components, extra_args, custom) {
+                match versions::launch::launch_with_console(&tag, &prof, state.console.clone(), state.brave_log_level, state.freeze_components, extra_args, custom, state.launch_as_admin) {
                     Ok(child) => {
                         crate::console::info(&state.console, "launch",
                             format!("relaunched {tag} (profile={prof})"));

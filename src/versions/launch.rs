@@ -14,6 +14,11 @@ pub struct LaunchOpts {
     /// When `Some`, used as `--user-data-dir` verbatim; otherwise the app
     /// computes a path under its standard profile directory from `profile`.
     pub custom_user_data_dir: Option<PathBuf>,
+    /// Windows-only: when true, route the launch through
+    /// `powershell Start-Process -Verb RunAs` so Brave starts elevated
+    /// (UAC prompt). Ignored on non-Windows hosts. The Child handle in
+    /// that case represents the launcher, not Brave.
+    pub run_as_admin: bool,
 }
 impl Default for LaunchOpts {
     fn default() -> Self {
@@ -24,6 +29,7 @@ impl Default for LaunchOpts {
             extra_args: vec![],
             log_level: BraveLogLevel::Quiet,
             custom_user_data_dir: None,
+            run_as_admin: false,
         }
     }
 }
@@ -46,12 +52,14 @@ pub fn launch_with_console(tag: &str, profile: &str,
                            log_level: BraveLogLevel,
                            freeze_components: bool,
                            extra_args: Vec<String>,
-                           custom_user_data_dir: Option<PathBuf>) -> Result<Child> {
+                           custom_user_data_dir: Option<PathBuf>,
+                           run_as_admin: bool) -> Result<Child> {
     let opts = LaunchOpts {
         log_level,
         disable_component_update: freeze_components,
         extra_args,
         custom_user_data_dir,
+        run_as_admin,
         ..LaunchOpts::default()
     };
     let mut child = launch_internal(tag, profile, &opts, /*pipe_stderr=*/true)?;
@@ -168,6 +176,91 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
     }
 
     for a in &opts.extra_args { cmd.arg(a); }
+
+    // Privilege escalation. Per-platform mechanism, but the same
+    // tradeoffs everywhere: the spawned Child represents the elevation
+    // launcher (powershell / osascript / pkexec), not Brave itself, so
+    // stderr piping and the per-row Stop force-kill don't apply.
+    // Debugging affordance only.
+    if opts.run_as_admin {
+        // On Linux Chromium refuses to run as root unless --no-sandbox
+        // is set. WSL launches already pass --no-sandbox, but a native
+        // Linux admin launch without it would just bail. Add it for
+        // every elevated launch on unix.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        cmd.arg("--no-sandbox");
+
+        #[cfg(windows)]
+        {
+            // PowerShell Start-Process -Verb RunAs: triggers UAC prompt.
+            // Each arg quoted in single quotes so embedded spaces / `=`
+            // don't get re-tokenised by PowerShell.
+            let argv: Vec<String> = cmd.get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            let quoted: Vec<String> = argv.iter()
+                .map(|a| format!("'{}'", a.replace('\'', "''")))
+                .collect();
+            let arg_list = quoted.join(",");
+            let ps_cmd = format!(
+                "Start-Process -FilePath '{}' -Verb RunAs -ArgumentList {}",
+                bin.display().to_string().replace('\'', "''"),
+                arg_list);
+            let mut shell = Command::new("powershell");
+            shell.args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd]);
+            tracing::info!("launching ELEVATED {} (profile={})",
+                bin.display(), user_data.display());
+            return Ok(shell.spawn()?);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // osascript bridge: `do shell script "..." with administrator
+            // privileges` triggers the macOS authentication prompt.
+            // Args are joined with spaces and each quoted with single
+            // quotes (escape stray quotes by closing-and-reopening
+            // around an escaped single quote).
+            let mut script = String::new();
+            script.push('\'');
+            script.push_str(&bin.display().to_string().replace('\'', "'\\''"));
+            script.push('\'');
+            for a in cmd.get_args() {
+                let s = a.to_string_lossy();
+                script.push(' ');
+                script.push('\'');
+                script.push_str(&s.replace('\'', "'\\''"));
+                script.push('\'');
+            }
+            // The whole shell script is then itself an AppleScript
+            // string literal — single double-quote escape.
+            let osa = format!(
+                "do shell script \"{}\" with administrator privileges",
+                script.replace('\\', "\\\\").replace('"', "\\\""));
+            let mut shell = Command::new("osascript");
+            shell.args(["-e", &osa]);
+            tracing::info!("launching ELEVATED {} (profile={})",
+                bin.display(), user_data.display());
+            return Ok(shell.spawn()?);
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            // pkexec is the graphical equivalent of sudo on
+            // freedesktop.org Linux — drives the polkit auth agent
+            // (e.g. polkit-gnome / lxqt-policykit) for a GUI prompt.
+            // Falls back to a hard error if pkexec isn't installed;
+            // we don't try sudo because it requires a TTY.
+            let argv: Vec<String> = cmd.get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            let mut shell = Command::new("pkexec");
+            shell.arg(&bin);
+            for a in argv { shell.arg(a); }
+            tracing::info!("launching ELEVATED {} (profile={})",
+                bin.display(), user_data.display());
+            return Ok(shell.spawn()?);
+        }
+    }
 
     if pipe_stderr {
         cmd.stderr(Stdio::piped());

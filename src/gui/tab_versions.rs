@@ -348,6 +348,33 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
                 ui.end_row();
 
+                ui.label("Launch as administrator:").on_hover_text(
+                    "Route every Launch through a privilege-escalation \
+                     wrapper:\n\
+                     • Windows: powershell Start-Process -Verb RunAs (UAC)\n\
+                     • macOS: osascript … with administrator privileges\n\
+                     • Linux: pkexec (polkit graphical auth)\n\
+                     Linux launches automatically add --no-sandbox \
+                     (Chromium refuses to run as root otherwise).\n\n\
+                     Caveats: stderr pipe and per-row Stop force-kill \
+                     don't apply — the Child handle is the launcher, \
+                     not Brave. Use only for debugging permission \
+                     issues; running browsers as root/admin is risky.");
+                ui.horizontal(|ui| {
+                    let prev = state.launch_as_admin;
+                    ui.checkbox(&mut state.launch_as_admin, "Enabled");
+                    if prev != state.launch_as_admin {
+                        state.config_dirty = true;
+                        crate::console::info(&state.console, "config",
+                            if state.launch_as_admin {
+                                "launch as admin: enabled".to_string()
+                            } else {
+                                "launch as admin: disabled".to_string()
+                            });
+                    }
+                });
+                ui.end_row();
+
                 ui.label("Incremental release cache:").on_hover_text(
                     "Persist every release we've ever fetched into sqlite \
                      and break out of pagination as soon as we re-encounter \
@@ -548,7 +575,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     };
                     let effective_user_data = custom.clone()
                         .unwrap_or_else(|| crate::paths::profile_dir(&profile));
-                    match versions::launch::launch_with_console(&v.tag, &profile, state.console.clone(), state.brave_log_level, state.freeze_components, extra_args, custom) {
+                    match versions::launch::launch_with_console(&v.tag, &profile, state.console.clone(), state.brave_log_level, state.freeze_components, extra_args, custom, state.launch_as_admin) {
                         Ok(child) => {
                             let msg = format!("launched {} (profile={})", v.tag,
                                 effective_user_data.display());
