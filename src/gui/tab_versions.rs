@@ -127,7 +127,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 ("90d", 90), ("120d", 120), ("150d", 150),
             ];
             let token_only: &[(&str, i64)] = &[
-                ("200d", 200), ("250d", 250), ("300d", 300),
+                ("200d", 200), ("250d", 250), ("300d", 300), ("365d", 365),
             ];
             let has_token = !state.github_token.trim().is_empty();
             let preset_iter = base.iter().chain(
@@ -145,7 +145,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             if !has_token {
                 ui.separator();
                 super::app::weak_label(ui,
-                    "200d / 250d / 300d unlock when a GitHub token is set in Settings");
+                    "200d / 250d / 300d / 365d unlock when a GitHub token is set in Settings");
             }
         });
         // Echo any date-filter change to the Console — preset name when
