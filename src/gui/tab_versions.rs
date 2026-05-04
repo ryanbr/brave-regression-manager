@@ -559,20 +559,57 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         String::new()
                     };
                     let extra_args = verdict::parse_launch_args(&effective_args);
-                    let custom = {
+                    // Resolve the user-data-dir source AND log which
+                    // precedence tier won — makes it obvious in the
+                    // Console why a custom profile did/didn't apply.
+                    let (custom, src) = {
                         let per_row = verdict::user_data_dir(&v.tag);
                         if !per_row.is_empty() {
-                            Some(std::path::PathBuf::from(per_row))
+                            (Some(std::path::PathBuf::from(per_row)), "per-row override")
                         } else if state.clean_profile_per_launch {
-                            Some(throwaway_profile_dir(&v.tag))
+                            (Some(throwaway_profile_dir(&v.tag)), "clean-profile-per-launch")
                         } else if state.default_profile_dir_enabled
                             && !state.default_profile_dir.is_empty()
                         {
-                            Some(std::path::PathBuf::from(&state.default_profile_dir))
+                            (Some(std::path::PathBuf::from(&state.default_profile_dir)),
+                             "Settings default profile folder")
                         } else {
-                            None
+                            (None, "standard app profile")
                         }
                     };
+                    if let Some(p) = &custom {
+                        let exists = p.exists();
+                        let local_state = p.join("Local State").exists();
+                        let singleton = p.join("SingletonLock").exists();
+                        crate::console::info(&state.console, "profile", format!(
+                            "source={src}  path={}  dir_exists={exists}  \
+                             looks_like_chromium_profile={local_state}  \
+                             singleton_lock_present={singleton}",
+                            p.display()));
+                        if singleton {
+                            crate::console::warn(&state.console, "profile",
+                                "SingletonLock found — Brave (or its updater) \
+                                 may already be running against this profile. \
+                                 Will be removed pre-launch, but a LIVE process \
+                                 holding the lock will cause Brave to exit \
+                                 within a few seconds (single-instance handoff).");
+                        }
+                        if !local_state && exists {
+                            crate::console::warn(&state.console, "profile",
+                                "no 'Local State' file in this folder — pointed \
+                                 at the wrong directory? Chromium expects the \
+                                 user-data-dir ROOT (containing Local State + \
+                                 Default/), not a sub-profile folder.");
+                        }
+                        // Schema/version mismatch + sub-profile inventory
+                        // — read Local State once and report both.
+                        if local_state {
+                            describe_local_state(&state.console, p, &v.tag);
+                        }
+                    } else {
+                        crate::console::info(&state.console, "profile",
+                            format!("source={src} (no override)"));
+                    }
                     let effective_user_data = custom.clone()
                         .unwrap_or_else(|| crate::paths::profile_dir(&profile));
                     match versions::launch::launch_with_console(&v.tag, &profile, state.console.clone(), state.brave_log_level, state.freeze_components, extra_args, custom, state.launch_as_admin) {
@@ -585,6 +622,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                 profile: profile.clone(),
                                 child,
                                 user_data_dir: effective_user_data,
+                                spawned_at: std::time::Instant::now(),
                             });
                             state.status_msg = msg;
                         }
@@ -2190,6 +2228,78 @@ pub(crate) fn throwaway_profile_dir(tag: &str) -> std::path::PathBuf {
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
         .collect();
     crate::paths::profiles_dir().join(format!("throwaway-{safe_tag}-{stamp}"))
+}
+
+/// Read `<user-data-dir>/Local State` and emit two pieces of context
+/// to the Console: a sub-profile inventory (which sub-folders exist
+/// + which one Local State marks as last-used) and a version-mismatch
+/// warning if the launching Brave version is older than whatever last
+/// wrote the profile (older Brave can't safely open newer schemas).
+fn describe_local_state(
+    console: &crate::console::Handle,
+    user_data_dir: &std::path::Path,
+    launching_tag: &str,
+) {
+    let path = user_data_dir.join("Local State");
+    let body = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Sub-profile inventory: collect names from profile.info_cache
+    // (preferred — that's what the profile picker actually uses) plus
+    // last_used. Falls back to dir-scanning when info_cache is empty.
+    let last_used = json.pointer("/profile/last_used")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Default")
+        .to_string();
+    let mut profiles: Vec<String> = json.pointer("/profile/info_cache")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    if profiles.is_empty() {
+        if let Ok(entries) = std::fs::read_dir(user_data_dir) {
+            profiles = entries.filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n == "Default" || n.starts_with("Profile "))
+                .collect();
+        }
+    }
+    profiles.sort();
+    crate::console::info(console, "profile", format!(
+        "sub-profiles in this user-data-dir: [{}]  last_used={last_used}  \
+         (override with --profile-directory=<name> in extra args)",
+        profiles.join(", ")));
+
+    // Version-mismatch warning. Local State stores e.g.
+    // "1.93.45.0"; the launching tag is "v1.92.15". Strip prefixes
+    // and split into integer components for a safe non-semver compare.
+    let last_ver = json.pointer("/browser/last_browser_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if last_ver.is_empty() { return; }
+    let parts = |s: &str| -> Vec<u32> {
+        s.trim_start_matches(['v', 'V']).split('.')
+            .filter_map(|p| p.parse::<u32>().ok())
+            .collect()
+    };
+    let cur = parts(launching_tag);
+    let prev = parts(last_ver);
+    if cur.is_empty() || prev.is_empty() { return; }
+    if cur < prev {
+        crate::console::warn(console, "profile", format!(
+            "schema downgrade risk: this profile was last opened by Brave \
+             {last_ver}; launching {launching_tag} (older). Newer Brave \
+             often migrates Preferences/Local State irreversibly — older \
+             Brave may refuse to open the profile (clean exit within a \
+             few seconds), or open in a degraded state. Use a Brave \
+             version >= {last_ver} to read the profile safely."));
+    }
 }
 
 /// Pattern-match common launch-failure OS error strings and return a

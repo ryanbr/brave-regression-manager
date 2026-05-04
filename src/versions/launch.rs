@@ -63,7 +63,7 @@ pub fn launch_with_console(tag: &str, profile: &str,
         run_as_admin,
         ..LaunchOpts::default()
     };
-    let mut child = launch_internal(tag, profile, &opts, /*pipe_stderr=*/true)?;
+    let mut child = launch_internal(tag, profile, &opts, /*pipe_stderr=*/true, Some(&console))?;
     if let Some(stderr) = child.stderr.take() {
         let label = format!("brave/{tag}");
         std::thread::spawn(move || {
@@ -80,10 +80,12 @@ pub fn launch_with_console(tag: &str, profile: &str,
 }
 
 pub fn launch_with(tag: &str, profile: &str, opts: &LaunchOpts) -> Result<Child> {
-    launch_internal(tag, profile, opts, /*pipe_stderr=*/false)
+    launch_internal(tag, profile, opts, /*pipe_stderr=*/false, /*console=*/None)
 }
 
-fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: bool) -> Result<Child> {
+fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts,
+                   pipe_stderr: bool,
+                   console: Option<&crate::console::Handle>) -> Result<Child> {
     let bin = paths::brave_binary(tag);
     if !bin.exists() {
         return Err(anyhow!("brave binary missing for {tag}: {}", bin.display()));
@@ -107,10 +109,18 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
 
     let mut cmd = Command::new(&bin);
     cmd.arg(format!("--user-data-dir={}", user_data.display()))
-       .arg(format!("--remote-debugging-port={}", opts.remote_debugging_port))
        .arg("--no-first-run")
        .arg("--no-default-browser-check")
        .arg("--disable-brave-update");
+    // Chromium (May 2022, post-CVE) refuses to enable
+    // --remote-debugging-port when --user-data-dir contains a normal
+    // user's personal profile — Brave exits within seconds. Only
+    // pass the flag when the caller actually requested a non-zero
+    // port; with port=0 we just skip it entirely so launches against
+    // real BraveSoftware\Brave-Browser-* profiles work.
+    if opts.remote_debugging_port != 0 {
+        cmd.arg(format!("--remote-debugging-port={}", opts.remote_debugging_port));
+    }
 
     if opts.disable_component_update {
         cmd.arg("--disable-component-update")
@@ -211,6 +221,8 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
             shell.args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd]);
             tracing::info!("launching ELEVATED {} (profile={})",
                 bin.display(), user_data.display());
+            log_argv_to_console(console, "launch (elevated/win)",
+                std::path::Path::new("powershell"), &shell);
             return Ok(shell.spawn()?);
         }
 
@@ -241,6 +253,8 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
             shell.args(["-e", &osa]);
             tracing::info!("launching ELEVATED {} (profile={})",
                 bin.display(), user_data.display());
+            log_argv_to_console(console, "launch (elevated/macos)",
+                std::path::Path::new("osascript"), &shell);
             return Ok(shell.spawn()?);
         }
 
@@ -259,6 +273,8 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
             for a in argv { shell.arg(a); }
             tracing::info!("launching ELEVATED {} (profile={})",
                 bin.display(), user_data.display());
+            log_argv_to_console(console, "launch (elevated/linux)",
+                std::path::Path::new("pkexec"), &shell);
             return Ok(shell.spawn()?);
         }
     }
@@ -268,7 +284,39 @@ fn launch_internal(tag: &str, profile: &str, opts: &LaunchOpts, pipe_stderr: boo
     }
 
     tracing::info!("launching {} (profile={})", bin.display(), user_data.display());
+    log_argv_to_console(console, "launch", &bin, &cmd);
     Ok(cmd.spawn()?)
+}
+
+/// Stream the full constructed command-line into the GUI Console
+/// (one line: `<binary> arg arg arg …`). Helpful for diagnosing why
+/// Brave behaves unexpectedly under a custom profile / arg combination
+/// — you can see exactly what was passed.
+fn log_argv_to_console(
+    console: Option<&crate::console::Handle>,
+    label: &str,
+    bin: &std::path::Path,
+    cmd: &Command,
+) {
+    let Some(c) = console else { return };
+    let mut line = String::new();
+    // Quote any arg containing whitespace so the printed line is
+    // copy-pasteable for manual reproduction.
+    let push_quoted = |out: &mut String, s: &str| {
+        if s.chars().any(char::is_whitespace) {
+            out.push('"');
+            out.push_str(&s.replace('"', "\\\""));
+            out.push('"');
+        } else {
+            out.push_str(s);
+        }
+    };
+    push_quoted(&mut line, &bin.display().to_string());
+    for a in cmd.get_args() {
+        line.push(' ');
+        push_quoted(&mut line, &a.to_string_lossy());
+    }
+    crate::console::info(c, label, format!("argv: {line}"));
 }
 
 /// Force-kill a Brave parent process AND every descendant. `Child::kill`

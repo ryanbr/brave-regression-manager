@@ -251,6 +251,9 @@ pub struct RunningBrave {
     pub profile: String,
     pub child:   Child,
     pub user_data_dir: PathBuf,
+    /// Wall-clock at spawn time. Used by `reap_running` to detect the
+    /// "exited within ~5 s" pattern so we can surface a fast-exit hint.
+    pub spawned_at: std::time::Instant,
 }
 
 impl AppState {

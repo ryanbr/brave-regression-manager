@@ -109,6 +109,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         state.running.insert(tag.clone(), super::state::RunningBrave {
                             tag, profile: prof.clone(), child,
                             user_data_dir: paths::profile_dir(&prof),
+                            spawned_at: std::time::Instant::now(),
                         });
                         state.status_msg = "relaunched".into();
                     }

@@ -172,17 +172,29 @@ impl App {
     /// (user closed the window, crash, etc.), drop the entry so the GUI
     /// stops showing "Stop" / "running" for it.
     fn reap_running(&mut self) {
-        let dead: Vec<String> = self.state.running.iter_mut()
-            .filter_map(|(tag, r)| match r.child.try_wait() {
-                Ok(Some(_status)) => Some(tag.clone()),
-                Ok(None)          => None,        // still running
-                Err(_)             => Some(tag.clone()), // can't poll → forget it
-            })
-            .collect();
-        for tag in dead {
-            if let Some(_r) = self.state.running.remove(&tag) {
+        // Capture (tag, exit_status, time-since-spawn) so the Console
+        // line can include both the duration the process was alive and
+        // its exit code — useful when a launch behaves oddly without
+        // having to guess from a bare "exited" message.
+        let now = std::time::Instant::now();
+        let dead: Vec<(String, Option<std::process::ExitStatus>, Option<std::time::Duration>)> =
+            self.state.running.iter_mut()
+                .filter_map(|(tag, r)| match r.child.try_wait() {
+                    Ok(Some(s)) => Some((tag.clone(), Some(s),
+                        Some(now.saturating_duration_since(r.spawned_at)))),
+                    Ok(None)    => None,
+                    Err(_)      => Some((tag.clone(), None, None)),
+                })
+                .collect();
+        for (tag, status, age) in dead {
+            if self.state.running.remove(&tag).is_some() {
+                let code = status.and_then(|s| s.code())
+                    .map(|c| format!(" (exit code {c})"))
+                    .unwrap_or_default();
+                let dur = age.map(|d| format!(" after {:.1}s", d.as_secs_f64()))
+                    .unwrap_or_default();
                 console::info(&self.state.console, "launch",
-                    format!("{tag} exited"));
+                    format!("{tag} exited{dur}{code}"));
             }
         }
     }
