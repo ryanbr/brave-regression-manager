@@ -191,6 +191,7 @@ pub struct AppState {
     pub clean_profile_per_launch: bool,
     pub incremental_release_cache: bool,
     pub launch_as_admin: bool,
+    pub versions_dir: String,
     pub fetching_releases: bool,
     /// Wall-clock at fetch spawn — the success/error drain formats a
     /// "in N.Ns" suffix on the completion line so the user can see how
@@ -307,6 +308,7 @@ impl AppState {
             clean_profile_per_launch: false,
             incremental_release_cache: true,
             launch_as_admin: false,
+            versions_dir: String::new(),
             fetching_releases: false,
             fetching_started: None,
             installing: None,

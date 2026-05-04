@@ -168,6 +168,14 @@ impl App {
         state.clean_profile_per_launch    = cfg.gui.clean_profile_per_launch;
         state.incremental_release_cache   = cfg.gui.incremental_release_cache;
         state.launch_as_admin             = cfg.gui.launch_as_admin;
+        state.versions_dir                = cfg.gui.versions_dir.clone();
+        // Wire the override into paths::versions_dir() *before* any
+        // disk work happens (cache load reads version_dir() to refresh
+        // `cached` flags). Empty value keeps the default.
+        if !state.versions_dir.is_empty() {
+            crate::paths::set_versions_dir_override(
+                std::path::PathBuf::from(&state.versions_dir));
+        }
         // Guard against an all-off persisted state — default back to Nightly.
         if !state.channel_release && !state.channel_beta && !state.channel_nightly {
             state.channel_nightly = true;
@@ -202,15 +210,18 @@ impl App {
         { format!("on ({})", state.default_args) }
         else if state.default_args_enabled { "on (empty)".to_string() }
         else { "off".to_string() };
+        let versions_dir_str = if state.versions_dir.is_empty() {
+            format!("default ({})", crate::paths::versions_dir().display())
+        } else { state.versions_dir.clone() };
         console::info(&state.console, "settings", format!(
             "theme={}  channels={}  release_count={}  date={}  \
              log_level={:?}  freeze_components={}  \
-             default_profile_folder={}  default_args={}  \
+             versions_dir={}  default_profile_folder={}  default_args={}  \
              clean_profile_per_launch={}  incremental_release_cache={}  \
              launch_as_admin={}  github_token={}",
             state.theme, chans, state.release_count, date_filter,
             state.brave_log_level, state.freeze_components,
-            prof_dir, def_args,
+            versions_dir_str, prof_dir, def_args,
             state.clean_profile_per_launch, state.incremental_release_cache,
             state.launch_as_admin, token_str));
         // Defer the heavy startup work — releases.json read + JSON
@@ -275,6 +286,7 @@ impl App {
         cfg.gui.clean_profile_per_launch    = self.state.clean_profile_per_launch;
         cfg.gui.incremental_release_cache   = self.state.incremental_release_cache;
         cfg.gui.launch_as_admin             = self.state.launch_as_admin;
+        cfg.gui.versions_dir                = self.state.versions_dir.clone();
         if let Err(e) = cfg.save(&paths::config_path()) {
             self.state.status_msg = format!("settings save failed: {e}");
         }

@@ -273,6 +273,54 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
                 ui.end_row();
 
+                ui.label("Brave install folder:").on_hover_text(
+                    "Override the directory Brave installs are extracted into. \
+                     Useful for putting the heavy install tree on a different drive \
+                     (e.g. C: → D:). Empty keeps the default <data-root>/versions/. \
+                     Profiles, downloads cache, and the sqlite db are unaffected.\n\n\
+                     CHANGE TAKES EFFECT NEXT LAUNCH — existing on-disk installs \
+                     are NOT moved automatically.");
+                ui.horizontal(|ui| {
+                    let prev = state.versions_dir.clone();
+                    let hover = if state.versions_dir.is_empty() {
+                        format!("default: {}", crate::paths::versions_dir().display())
+                    } else {
+                        state.versions_dir.clone()
+                    };
+                    if ui.button("Browse…").on_hover_text(hover).clicked()
+                    {
+                        let mut dlg = rfd::FileDialog::new()
+                            .set_title("Pick Brave install folder");
+                        if !state.versions_dir.is_empty() {
+                            dlg = dlg.set_directory(&state.versions_dir);
+                        }
+                        if let Some(picked) = dlg.pick_folder() {
+                            state.versions_dir = picked.display().to_string();
+                        }
+                    }
+                    if !state.versions_dir.is_empty()
+                        && ui.button("Use Default").on_hover_text(
+                            "Drop the override and use the standard \
+                             <data-root>/versions/ directory on next launch").clicked()
+                    {
+                        state.versions_dir.clear();
+                    }
+                    if prev != state.versions_dir {
+                        state.config_dirty = true;
+                        crate::console::info(&state.console, "config",
+                            if state.versions_dir.is_empty() {
+                                format!("brave install folder: cleared \
+                                         (using default {} on next launch)",
+                                        crate::paths::versions_dir().display())
+                            } else {
+                                format!("brave install folder: {} \
+                                         (takes effect on next launch)",
+                                        state.versions_dir)
+                            });
+                    }
+                });
+                ui.end_row();
+
                 ui.label("Default profile folder:").on_hover_text(
                     "When enabled, this folder is used as `--user-data-dir` for any \
                      installed version that doesn't have its own per-row override. \
@@ -281,20 +329,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     let prev_enabled = state.default_profile_dir_enabled;
                     let prev_path    = state.default_profile_dir.clone();
                     ui.checkbox(&mut state.default_profile_dir_enabled, "Enabled");
-                    let label = if state.default_profile_dir.is_empty() {
-                        "Browse…".to_string()
-                    } else {
-                        let short = std::path::Path::new(&state.default_profile_dir)
-                            .file_name().and_then(|s| s.to_str())
-                            .unwrap_or(state.default_profile_dir.as_str())
-                            .to_string();
-                        short
-                    };
+                    let hover = if state.default_profile_dir.is_empty() {
+                        "Pick the default user-data-dir".to_string()
+                    } else { state.default_profile_dir.clone() };
                     if ui.add_enabled(state.default_profile_dir_enabled,
-                                      egui::Button::new(label))
-                        .on_hover_text(if state.default_profile_dir.is_empty() {
-                            "Pick the default user-data-dir".to_string()
-                        } else { state.default_profile_dir.clone() })
+                                      egui::Button::new("Browse…"))
+                        .on_hover_text(hover)
                         .clicked()
                     {
                         let mut dlg = rfd::FileDialog::new()

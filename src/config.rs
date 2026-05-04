@@ -68,6 +68,12 @@ pub struct Gui {
     /// work for those launches — the spawned Child handle represents
     /// the launcher, not Brave itself.
     #[serde(default)] pub launch_as_admin: bool,
+    /// Override for the directory Brave installs are extracted into.
+    /// Default (empty) keeps the standard `<data_root>/versions/`. Set
+    /// this to relocate the heavy install tree off the default drive
+    /// (e.g. AppData on C: → a roomier D: partition). Other data dirs
+    /// — profiles, cache/downloads, db — are unaffected.
+    #[serde(default)] pub versions_dir: String,
 }
 
 fn default_true() -> bool { true }
@@ -94,6 +100,7 @@ impl Default for Gui {
             clean_profile_per_launch: false,
             incremental_release_cache: true,
             launch_as_admin: false,
+            versions_dir: String::new(),
         }
     }
 }

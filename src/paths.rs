@@ -18,7 +18,24 @@ pub fn data_root() -> PathBuf {
     { dirs::data_local_dir().unwrap_or_else(|| dirs::home_dir().unwrap().join(".local/share")).join("brave-regress") }
 }
 
-pub fn versions_dir() -> PathBuf  { data_root().join("versions") }
+/// Optional override for `versions_dir()` set from the Settings UI at
+/// startup. When `Some(path)`, every Brave install / uninstall / launch
+/// path resolution uses this directory instead of the default
+/// `<data_root>/versions`. Useful for putting installs on a different
+/// drive (e.g. C: → D:) without moving anything else. `OnceLock` so the
+/// override is set once after config load and read lock-free thereafter.
+static VERSIONS_DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_versions_dir_override(p: PathBuf) {
+    let _ = VERSIONS_DIR_OVERRIDE.set(p);
+}
+
+pub fn versions_dir() -> PathBuf {
+    if let Some(p) = VERSIONS_DIR_OVERRIDE.get() {
+        return p.clone();
+    }
+    data_root().join("versions")
+}
 pub fn profiles_dir() -> PathBuf  { data_root().join("profiles") }
 pub fn downloads_dir() -> PathBuf { data_root().join("cache/downloads") }
 pub fn db_dir() -> PathBuf        { data_root().join("db") }
