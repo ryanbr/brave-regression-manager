@@ -70,6 +70,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         if ui.checkbox(&mut hide, "Hide releases with no installer").changed() {
             state.hide_no_installer = hide;
             state.config_dirty = true;
+            crate::console::info(&state.console, "config",
+                format!("hide_no_installer: {}", if hide { "on" } else { "off" }));
         }
 
         ui.separator();
@@ -176,8 +178,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         }
                     });
                 if new_count != state.release_count {
+                    let prev = state.release_count;
                     state.release_count = new_count;
                     state.config_dirty = true;
+                    crate::console::info(&state.console, "config",
+                        format!("release_count: {prev} -> {new_count}"));
                     if !state.available.is_empty() && !state.fetching_releases {
                         spawn_fetch(state);
                     }
@@ -252,6 +257,15 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     let now = (state.channel_release, state.channel_beta, state.channel_nightly);
                     if prev != now {
                         state.config_dirty = true;
+                        let chans = {
+                            let mut v: Vec<&str> = Vec::new();
+                            if now.0 { v.push("Release"); }
+                            if now.1 { v.push("Beta"); }
+                            if now.2 { v.push("Nightly"); }
+                            v.join("+")
+                        };
+                        crate::console::info(&state.console, "config",
+                            format!("channels: {chans}"));
                         if !state.fetching_releases {
                             spawn_fetch(state);
                         }
@@ -428,6 +442,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.github_token = tok;
                     state.config_dirty = true;
+                    // Token value is intentionally never logged — only
+                    // the cleared/set state and length are surfaced.
+                    let s = if state.github_token.is_empty() { "cleared".to_string() }
+                            else { format!("set ({} chars)", state.github_token.len()) };
+                    crate::console::info(&state.console, "config",
+                        format!("github_token: {s}"));
                 }
                 ui.end_row();
             });
