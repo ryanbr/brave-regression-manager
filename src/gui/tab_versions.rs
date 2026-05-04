@@ -79,8 +79,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // `2021..=current_year` and Jan..Dec respectively. The user
         // *cannot* select pre-2021 because those years aren't in the
         // dropdown at all.
-        let prev_from = state.date_from;
-        let prev_to   = state.date_to;
         ym_combo(ui, "date_from", &mut state.date_from, today,
                  EndOfMonth::Start, &mut state.config_dirty);
         ui.label("to:");
@@ -94,23 +92,28 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             state.date_to   = None;
             state.config_dirty = true;
         }
+        // Preset clicks are an explicit single-action intent — auto-fetch
+        // is fine here. The from/to combos are NOT auto-fetched: picking
+        // just the year would otherwise immediately fire a fetch back to
+        // January of that year before the user got to the month combo.
+        // The user can still trigger a fetch via the explicit "Fetch
+        // GitHub releases" button after editing the combos.
+        let mut preset_clicked = false;
         for (label, days) in [("7d", 7i64), ("30d", 30), ("60d", 60), ("90d", 90), ("120d", 120), ("150d", 150)] {
             if ui.small_button(label).clicked() {
                 state.date_to   = Some(today);
                 state.date_from = Some(clamp_date(today - chrono::Duration::days(days)));
                 state.config_dirty = true;
+                preset_clicked = true;
             }
         }
 
-        // Date filter changed: refetch when the new window asks for
-        // releases *older* than anything currently cached, OR when the
-        // cache itself is stale (Brave nightlies land multiple times a
-        // day, so a cache more than 10 minutes old can be missing the
-        // latest). Pure-narrowing within a fresh cache is still served
-        // from memory — instant, no API call.
-        let date_changed  = state.date_from != prev_from || state.date_to != prev_to;
+        // Auto-refetch only fires for preset clicks. Refetch when the
+        // requested window asks for releases *older* than anything
+        // currently cached, OR when the cache is stale (>10 min — Brave
+        // nightlies land multiple times a day).
         let filter_active = state.date_from.is_some() || state.date_to.is_some();
-        if date_changed && filter_active
+        if preset_clicked && filter_active
             && !state.available.is_empty() && !state.fetching_releases
         {
             let oldest_cached = state.available.iter()
@@ -817,15 +820,25 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         }
         if !rows.is_empty() && shown == 0 {
             let oldest_short = oldest.map(short_date).unwrap_or_default();
-            let msg = if state.date_from.is_some() || state.date_to.is_some() {
-                format!(
-                    "0 of {} releases match the date filter. Cache only goes back to {}. \
-                     Increase 'Releases to fetch' in Settings and re-fetch to load older tags.",
-                    rows.len(), oldest_short)
-            } else {
-                format!("0 of {} releases pass the current filters.", rows.len())
-            };
-            ui.colored_label(Color32::from_rgb(220, 180, 60), msg);
+            let date_filter_active = state.date_from.is_some() || state.date_to.is_some();
+            ui.horizontal(|ui| {
+                if date_filter_active {
+                    ui.colored_label(Color32::from_rgb(220, 180, 60), format!(
+                        "0 of {} releases match the date filter. Cache only goes back to {}.",
+                        rows.len(), oldest_short));
+                    // Actionable button — kicks off a fetch back to the
+                    // user's requested date_from in one click. Beats the
+                    // old "go to Settings → bump count → re-fetch" prose.
+                    if !state.fetching_releases
+                        && ui.button("Fetch back to date range").clicked()
+                    {
+                        spawn_fetch(state);
+                    }
+                } else {
+                    ui.colored_label(Color32::from_rgb(220, 180, 60), format!(
+                        "0 of {} releases pass the current filters.", rows.len()));
+                }
+            });
         }
         // Fixed column widths so each row aligns vertically — looks much
         // tidier than ui.horizontal where every cell sizes itself. Header
@@ -1501,6 +1514,14 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
     } else {
         format!("fetching {count} tags…")
     };
+    // Snapshot the oldest cached release date so the async task can
+    // decide whether incremental's known-tag short-circuit is safe to
+    // apply (it isn't when the user is asking for something deeper
+    // than the cache currently covers).
+    let oldest_cached: Option<chrono::NaiveDate> = state.available.iter()
+        .filter_map(|r| r.published_at.get(..10))
+        .filter_map(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .min();
     let slot          = state.slots.available.clone();
     let partial_slot  = state.slots.partial_releases.clone();
     let token         = state.github_token.clone();
@@ -1567,9 +1588,23 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         }
         // Stream each page of results into the partial slot. The GUI's
         // drain loop picks them up between frames and re-renders.
-        let known = if incremental { verdict::known_release_cache_tags() }
-                    else           { Default::default() };
-        let result = if incremental {
+        //
+        // Honor the known-tag short-circuit only when the user isn't
+        // explicitly asking for a date deeper than the cache. If
+        // stop_at is older than the oldest cached release, breaking
+        // out on the first known tag would leave the requested deep
+        // range un-fetched — pass None instead so the fetcher walks
+        // all the way back to stop_at, then everything new along the
+        // way is upserted into sqlite as usual.
+        let need_deeper_walk = match (stop_at, oldest_cached) {
+            (Some(want), Some(have)) => want < have,
+            (Some(_),    None)       => true,
+            _                        => false,
+        };
+        let use_known = incremental && !need_deeper_walk;
+        let known = if use_known { verdict::known_release_cache_tags() }
+                    else         { Default::default() };
+        let result = if use_known {
             versions::github::list_nightly_releases_streaming_incremental(
                 count, tok, stop_at, filter, &known,
                 |partial| {

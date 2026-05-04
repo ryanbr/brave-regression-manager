@@ -200,10 +200,11 @@ async fn list_releases_streaming(
     let octo = builder.build()?;
 
     let target = count.max(1) as usize;
-    // 50 * 100 = 5000 raw releases — covers about 4.5 years of Brave Nightlies.
-    // Either the target count, the stop_at date, or this hard ceiling
-    // terminates the loop.
-    let max_pages: u32 = 50;
+    // 200 * 100 = 20 000 raw releases — easily covers Brave's whole
+    // GitHub release history (≈ 7+ years). Either the target count,
+    // the stop_at date, the known-tag short-circuit, or this hard
+    // ceiling terminates the loop.
+    let max_pages: u32 = 200;
     let mut out: Vec<Release> = Vec::new();
     let mut crossed_stop = false;
     let mut crossed_known = false;
@@ -211,7 +212,7 @@ async fn list_releases_streaming(
     // When stop_at is set, the user has implicitly asked for "everything
     // back to this date" — so the count cap is moot. Use a much larger
     // effective target so we don't stop short before crossing stop_at.
-    let effective_target = if stop_at.is_some() { 5000 } else { target };
+    let effective_target = if stop_at.is_some() { 20_000 } else { target };
 
     for page_num in 1..=max_pages {
         let page = octo.repos(OWNER, REPO).releases().list()
