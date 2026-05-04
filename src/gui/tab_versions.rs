@@ -2322,7 +2322,19 @@ fn sort_available_indices(
         };
         // Tag-asc as the stable secondary key — equal primary keys sort
         // by tag so the row order is deterministic between repaints.
-        let ord = ord.then_with(|| a.tag.cmp(&b.tag));
+        // Use semver compare (same as the primary Tag sort) rather than
+        // a lexicographic string compare, otherwise within a same-date
+        // group `v1.92.9` lands above `v1.92.13` because '1' < '9'
+        // char-wise.
+        let tie = {
+            let pa = semver::Version::parse(a.tag.trim_start_matches('v')).ok();
+            let pb = semver::Version::parse(b.tag.trim_start_matches('v')).ok();
+            match (pa, pb) {
+                (Some(va), Some(vb)) => va.cmp(&vb),
+                _ => a.tag.cmp(&b.tag),
+            }
+        };
+        let ord = ord.then(tie);
         if asc { ord } else { ord.reverse() }
     });
 }
