@@ -1105,10 +1105,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // Fixed column widths so each row aligns vertically — looks much
         // tidier than ui.horizontal where every cell sizes itself. Header
         // uses the same widths so columns line up under their titles.
-        const COL_TAG:      f32 = 110.0;
-        const COL_DATE:     f32 =  90.0;
+        const COL_TAG:      f32 = 100.0;
+        const COL_DATE:     f32 =  80.0;
         const COL_CHANNEL:  f32 =  76.0;
-        const COL_VERDICT:  f32 =  72.0;
+        const COL_VERDICT:  f32 =  50.0;
         const COL_NOTE:     f32 =  44.0;
         // Status/action is fixed-width so the trailing Comments cell
         // shares a common left edge across rows. Tight enough that
