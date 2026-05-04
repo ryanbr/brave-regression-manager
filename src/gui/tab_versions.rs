@@ -966,8 +966,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             // Refresh `cached` flags on the in-memory rows
                             // so the [cached] pill / "Install (cached)"
                             // label disappear next frame.
+                            let dl_idx = super::state::read_downloads_index();
                             for r in std::sync::Arc::make_mut(&mut state.available).iter_mut() {
-                                r.refresh_cached();
+                                r.refresh_cached_with(&dl_idx);
                             }
                             let mb = bytes as f64 / 1_048_576.0;
                             crate::console::info(&state.console, "cache",
@@ -1990,7 +1991,8 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         // Helper: convert a Vec<github::Release> → Vec<ReleaseRow> for the GUI.
         // Also persists each row to sqlite `release_cache` when incremental
         // mode is on, so future fetches can short-circuit on known tags.
-        fn to_rows(rs: Vec<versions::github::Release>, incremental: bool) -> Vec<ReleaseRow> {
+        fn to_rows(rs: Vec<versions::github::Release>, incremental: bool,
+                   dl_idx: &super::state::DownloadsIndex) -> Vec<ReleaseRow> {
             rs.into_iter().map(|r| {
                 let skip_reason = r.skip_reason();
                 let channel = match versions::github::detect_release_channel(&r) {
@@ -2019,7 +2021,7 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     channel,
                     chromium_version,
                 };
-                row.refresh_cached();
+                row.refresh_cached_with(dl_idx);
                 if incremental {
                     if let Ok(json) = serde_json::to_string(&row) {
                         let _ = verdict::upsert_release_cache_row(&row.tag, &json);
@@ -2046,23 +2048,27 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         let use_known = incremental && !need_deeper_walk;
         let known = if use_known { verdict::known_release_cache_tags() }
                     else         { Default::default() };
+        // One read_dir of the downloads cache shared by every to_rows
+        // invocation in this fetch — partial-page callbacks AND the
+        // final result. Avoids N stat() calls per page.
+        let dl_idx = super::state::read_downloads_index();
         let result = if use_known {
             versions::github::list_nightly_releases_streaming_incremental(
                 count, tok, stop_at, filter, &known,
                 |partial| {
-                    let rows = to_rows(partial, incremental);
+                    let rows = to_rows(partial, incremental, &dl_idx);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
-                .map(|rs| to_rows(rs, incremental))
+                .map(|rs| to_rows(rs, incremental, &dl_idx))
                 .map_err(|e| e.to_string())
         } else {
             versions::github::list_nightly_releases_streaming(
                 count, tok, stop_at, filter,
                 |partial| {
-                    let rows = to_rows(partial, incremental);
+                    let rows = to_rows(partial, incremental, &dl_idx);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
-                .map(|rs| to_rows(rs, incremental))
+                .map(|rs| to_rows(rs, incremental, &dl_idx))
                 .map_err(|e| e.to_string())
         };
         *slot.lock().unwrap() = Some(result);

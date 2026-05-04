@@ -240,15 +240,20 @@ impl App {
                               Option<chrono::DateTime<chrono::Utc>>)
                 = (Vec::new(), None);
             if let Some(cache) = ReleaseCache::load() {
+                // Single read_dir of the downloads cache — every row
+                // below consults this map instead of stat'ing on its
+                // own. With multi-thousand-row caches the syscall
+                // savings are substantial.
+                let dl_idx = super::state::read_downloads_index();
                 let mut rows = cache.rows;
-                for r in &mut rows { r.refresh_cached(); r.ensure_channel(); }
+                for r in &mut rows { r.refresh_cached_with(&dl_idx); r.ensure_channel(); }
                 if incremental {
                     use std::collections::HashMap;
                     let mut by_tag: HashMap<String, super::state::ReleaseRow> =
                         rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
                     for json in crate::verdict::all_release_cache_rows() {
                         if let Ok(mut r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
-                            r.refresh_cached();
+                            r.refresh_cached_with(&dl_idx);
                             r.ensure_channel();
                             by_tag.entry(r.tag.clone()).or_insert(r);
                         }
@@ -416,8 +421,9 @@ impl App {
                     console::info(&self.state.console, "install", &msg);
                     self.state.status_msg = msg;
                     self.state.installed = crate::versions::list_installed().unwrap_or_default();
+                    let dl_idx = super::state::read_downloads_index();
                     for r in std::sync::Arc::make_mut(&mut self.state.available).iter_mut() {
-                        r.refresh_cached();
+                        r.refresh_cached_with(&dl_idx);
                     }
                 }
                 Err(e) => {

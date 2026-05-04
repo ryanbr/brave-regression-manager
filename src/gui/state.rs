@@ -111,13 +111,54 @@ pub struct ReleaseRow {
     pub chromium_version: Option<String>,
 }
 
+/// Snapshot of `<data-root>/cache/downloads/` — `(file_name -> size_in_bytes)`.
+/// Built once via `read_downloads_index` and reused to refresh `cached`
+/// flags for every ReleaseRow without paying a syscall per row. With
+/// ~4000 rows the old per-row `fs::metadata` was N stat() calls; this
+/// is one read_dir.
+pub type DownloadsIndex = std::collections::HashMap<String, u64>;
+
+/// Single read_dir of the downloads cache, returning a name -> size
+/// map. Empty / unreadable dir → empty map (every row flips to
+/// `cached=false` which is the safe default).
+pub fn read_downloads_index() -> DownloadsIndex {
+    let mut out = DownloadsIndex::new();
+    let dir = crate::paths::downloads_dir();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let (Some(name), Ok(meta)) = (
+                entry.file_name().to_str().map(str::to_string),
+                entry.metadata(),
+            ) {
+                if meta.is_file() { out.insert(name, meta.len()); }
+            }
+        }
+    }
+    out
+}
+
 impl ReleaseRow {
     /// Re-stat the cache directory to refresh `cached` for this row.
+    /// Single-row variant — pays an `fs::metadata` syscall. Use
+    /// `refresh_cached_with` when refreshing many rows in a row, since
+    /// that lets all rows share one `read_dir`.
     pub fn refresh_cached(&mut self) {
         self.cached = match (&self.host_asset, self.asset_size) {
             (Some(name), Some(size)) => {
                 let p = crate::paths::downloads_dir().join(name);
                 std::fs::metadata(&p).map(|m| m.len() == size).unwrap_or(false)
+            }
+            _ => false,
+        };
+    }
+    /// Bulk-friendly variant — looks the (name, size) pair up in a
+    /// pre-built `DownloadsIndex` instead of doing its own `metadata`
+    /// syscall. Caller is responsible for building the index once
+    /// before iterating.
+    pub fn refresh_cached_with(&mut self, idx: &DownloadsIndex) {
+        self.cached = match (&self.host_asset, self.asset_size) {
+            (Some(name), Some(size)) => {
+                idx.get(name).map(|&s| s == size).unwrap_or(false)
             }
             _ => false,
         };
