@@ -880,6 +880,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         }
     });
 
+    // Bulk-load every per-tag verdict and note in two sqlite queries
+    // before render — the row loop and the sort comparator both look
+    // these up per-row, so without this we'd pay O(n) reads per render
+    // + O(n log n) reads per sort, every frame. With ~4000 cached
+    // releases that worked out to ~50k mutex+query operations per
+    // 60fps frame; this collapses it to two queries per frame.
+    let verdicts_by_tag = verdict::all_version_verdicts();
+    let notes_by_tag    = verdict::all_notes();
     // Fill remaining vertical space so a tall window doesn't show a big
     // empty band below this panel.
     egui::ScrollArea::vertical().id_source("avail")
@@ -1036,7 +1044,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // find regardless of the user's current sort key, with a
         // separator drawn between the manual block and the rest.
         let mut rows = rows;
-        sort_available_rows(&mut rows, state.avail_sort_by, state.avail_sort_asc);
+        sort_available_rows(&mut rows, state.avail_sort_by, state.avail_sort_asc,
+            &verdicts_by_tag, &notes_by_tag);
         rows.sort_by_key(|r| !state.manual_release_tags.contains(&r.tag));
 
         // Manually-added tags also bypass the date filter — if the user
@@ -1094,7 +1103,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 fixed_cell(ui, COL_VERDICT, &mut |ui| {
-                    let row_verdict = verdict::version_verdict(&r.tag).unwrap_or(Verdict::Unknown);
+                    let row_verdict = verdicts_by_tag.get(&r.tag).copied().unwrap_or(Verdict::Unknown);
                     if row_verdict != Verdict::Unknown {
                         ui.colored_label(verdict_color(row_verdict),
                             RichText::new(format!("[{}]", verdict_label(row_verdict))).strong());
@@ -1102,7 +1111,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 // Note cell — inline so it can mutate state when clicked.
-                let cur_note = verdict::note(&r.tag);
+                let cur_note = notes_by_tag.get(&r.tag).cloned().unwrap_or_default();
                 ui.scope(|ui| {
                     ui.set_min_width(COL_NOTE);
                     ui.set_max_width(COL_NOTE);
@@ -2052,9 +2061,11 @@ fn sort_available_rows(
     rows: &mut [super::state::ReleaseRow],
     by: super::state::AvailSortColumn,
     asc: bool,
+    verdicts_by_tag: &std::collections::HashMap<String, crate::verdict::Verdict>,
+    notes_by_tag: &std::collections::HashMap<String, String>,
 ) {
     use super::state::AvailSortColumn as C;
-    use crate::verdict::{self, Verdict};
+    use crate::verdict::Verdict;
     let verdict_rank = |v: Verdict| -> u8 {
         match v {
             Verdict::Bad      => 0,
@@ -2086,17 +2097,18 @@ fn sort_available_rows(
             }
             C::Channel => a.channel.cmp(&b.channel),
             C::Verdict => {
-                let ra = verdict_rank(verdict::version_verdict(&a.tag).unwrap_or(Verdict::Unknown));
-                let rb = verdict_rank(verdict::version_verdict(&b.tag).unwrap_or(Verdict::Unknown));
+                let ra = verdict_rank(verdicts_by_tag.get(&a.tag).copied().unwrap_or(Verdict::Unknown));
+                let rb = verdict_rank(verdicts_by_tag.get(&b.tag).copied().unwrap_or(Verdict::Unknown));
                 ra.cmp(&rb)
             }
             C::Note => {
                 // Two-key sort: rows with notes first, then by note body.
-                let na = verdict::note(&a.tag);
-                let nb = verdict::note(&b.tag);
+                let empty = String::new();
+                let na = notes_by_tag.get(&a.tag).unwrap_or(&empty);
+                let nb = notes_by_tag.get(&b.tag).unwrap_or(&empty);
                 let pa = if na.is_empty() { 1 } else { 0 };
                 let pb = if nb.is_empty() { 1 } else { 0 };
-                pa.cmp(&pb).then(na.cmp(&nb))
+                pa.cmp(&pb).then(na.cmp(nb))
             }
         };
         // Tag-asc as the stable secondary key — equal primary keys sort

@@ -298,6 +298,42 @@ pub fn version_verdict(tag: &str) -> Result<Verdict> {
     Ok(v.as_deref().map(Verdict::from_db).unwrap_or(Verdict::Unknown))
 }
 
+/// Bulk-load every (tag, verdict) pair in one sqlite query — used by
+/// the Available list render so we don't pay an O(n) per-row sqlite
+/// hit (and an O(n log n) sort comparator hit) every frame.
+pub fn all_version_verdicts() -> std::collections::HashMap<String, Verdict> {
+    let conn = match open() { Ok(c) => c, Err(_) => return Default::default() };
+    let mut out = std::collections::HashMap::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT tag, verdict FROM version_verdict") {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            let tag: String = r.get(0)?;
+            let v: String = r.get(1)?;
+            Ok((tag, Verdict::from_db(&v)))
+        }) {
+            out.extend(rows.filter_map(|r| r.ok()));
+        }
+    }
+    out
+}
+
+/// Bulk-load every (tag, note body) pair. Same motivation as
+/// `all_version_verdicts` — collapses N per-row reads + N comparator
+/// reads into one query per frame.
+pub fn all_notes() -> std::collections::HashMap<String, String> {
+    let conn = match open() { Ok(c) => c, Err(_) => return Default::default() };
+    let mut out = std::collections::HashMap::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT tag, body FROM notes") {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            let tag: String = r.get(0)?;
+            let body: String = r.get(1)?;
+            Ok((tag, body))
+        }) {
+            out.extend(rows.filter_map(|r| r.ok()));
+        }
+    }
+    out
+}
+
 /// Persist a per-tag (chromium_version, published_at, channel) so the
 /// GUI can fall back to it when a tag isn't in the currently-fetched
 /// available list (e.g. an older installed tag, or a tag from before
