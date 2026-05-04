@@ -476,20 +476,40 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         if installed.is_empty() {
             super::app::weak_label(ui, "(none yet — install a tag below)");
         }
+        // Fixed widths so the leading cells (bullet, tag, path, copy)
+        // line up vertically across rows. The trailing widgets (Launch,
+        // Profile, verdict, args, Open, Del) still vary because Stop /
+        // × only appear under certain conditions.
+        const I_DOT:  f32 =  18.0;
+        const I_TAG:  f32 = 100.0;
+        // 330 absorbs the trailing empty space at the end of the row
+        // while still letting Open/Del land on-row in a default-width
+        // window. Long paths still truncate (`Label::truncate(true)`
+        // below), so anything wider just gets ellipsised.
+        const I_PATH: f32 = 330.0;
         for v in &installed {
             ui.horizontal(|ui| {
                 let verdict = verdict::version_verdict(&v.tag).unwrap_or(Verdict::Unknown);
                 let dot_color = verdict_color(verdict);
-                // Use a basic asterisk-style bullet that egui's default font
-                // definitely supports — `●` (U+25CF) was rendering as a tofu square.
-                ui.colored_label(dot_color, "•");
-                // Color + bold the version number by its verdict so the row's
-                // status is readable at a glance even if you ignore the bullet.
-                ui.label(RichText::new(&v.tag).monospace().strong().color(dot_color));
+                let fixed = |ui: &mut Ui, w: f32, draw: &mut dyn FnMut(&mut Ui)| {
+                    ui.scope(|ui| {
+                        ui.set_min_width(w);
+                        ui.set_max_width(w);
+                        draw(ui);
+                    });
+                };
+                fixed(ui, I_DOT, &mut |ui| {
+                    ui.colored_label(dot_color, "•");
+                });
+                fixed(ui, I_TAG, &mut |ui| {
+                    ui.label(RichText::new(&v.tag).monospace().strong().color(dot_color));
+                });
                 let full_path = v.folder.display().to_string();
                 let short_path = truncate_path(&full_path, 48);
-                ui.label(&short_path)
-                    .on_hover_text(&full_path);
+                fixed(ui, I_PATH, &mut |ui| {
+                    ui.add(egui::Label::new(&short_path).truncate(true))
+                        .on_hover_text(&full_path);
+                });
                 if ui.small_button("Copy")
                     .on_hover_text(format!("Copy path:\n{full_path}"))
                     .clicked()
@@ -651,7 +671,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     .or_insert_with(|| verdict::launch_args(&v.tag));
                 let resp = ui.add(
                     egui::TextEdit::singleline(buf)
-                        .desired_width(180.0)
+                        .desired_width(140.0)
                         .hint_text("extra args (e.g. --js-flags=…)")
                 );
                 if resp.lost_focus() {
