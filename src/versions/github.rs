@@ -143,7 +143,7 @@ impl Release {
 /// care about channel filtering (default: Nightly only, matching legacy
 /// behaviour).
 pub async fn list_nightly_releases(count: u32) -> Result<Vec<Release>> {
-    list_releases_streaming(count, None, None, ChannelFilter::default(), |_| {}).await
+    list_releases_streaming(count, None, None, ChannelFilter::default(), None, |_| {}).await
 }
 
 /// Streaming variant: invokes `on_progress` after every paginated page
@@ -162,7 +162,22 @@ pub async fn list_nightly_releases_streaming(
     filter: ChannelFilter,
     on_progress: impl FnMut(Vec<Release>) + Send,
 ) -> Result<Vec<Release>> {
-    list_releases_streaming(count, token, stop_at, filter, on_progress).await
+    list_releases_streaming(count, token, stop_at, filter, None, on_progress).await
+}
+
+/// Same as the public entry point but also accepts `known_tags` — when
+/// provided, pagination breaks out as soon as we encounter a tag that's
+/// already in the set. Used by the incremental cache mode so a refetch
+/// only walks new pages instead of re-traversing the entire history.
+pub async fn list_nightly_releases_streaming_incremental(
+    count: u32,
+    token: Option<&str>,
+    stop_at: Option<chrono::NaiveDate>,
+    filter: ChannelFilter,
+    known_tags: &std::collections::HashSet<String>,
+    on_progress: impl FnMut(Vec<Release>) + Send,
+) -> Result<Vec<Release>> {
+    list_releases_streaming(count, token, stop_at, filter, Some(known_tags), on_progress).await
 }
 
 async fn list_releases_streaming(
@@ -170,6 +185,7 @@ async fn list_releases_streaming(
     token: Option<&str>,
     stop_at: Option<chrono::NaiveDate>,
     filter: ChannelFilter,
+    known_tags: Option<&std::collections::HashSet<String>>,
     mut on_progress: impl FnMut(Vec<Release>) + Send,
 ) -> Result<Vec<Release>> {
     let filter = filter.nonempty();
@@ -190,6 +206,7 @@ async fn list_releases_streaming(
     let max_pages: u32 = 50;
     let mut out: Vec<Release> = Vec::new();
     let mut crossed_stop = false;
+    let mut crossed_known = false;
 
     // When stop_at is set, the user has implicitly asked for "everything
     // back to this date" — so the count cap is moot. Use a much larger
@@ -202,6 +219,16 @@ async fn list_releases_streaming(
         if page.items.is_empty() { break; }
 
         for r in page.items {
+            // Incremental short-circuit: as soon as we see a tag we
+            // already have in the persistent release_cache, everything
+            // older is also known — break out without recording further.
+            // Releases land monotonically (newest first) so a single hit
+            // is enough; no gap detection needed because the cache is
+            // append-only.
+            if let Some(known) = known_tags {
+                if known.contains(&r.tag_name) { crossed_known = true; break; }
+            }
+
             let published = r.published_at.map(|d| d.to_rfc3339()).unwrap_or_default();
             if let Some(stop) = stop_at {
                 if let Some(date_str) = published.split('T').next() {
@@ -232,9 +259,10 @@ async fn list_releases_streaming(
         }
         on_progress(out.clone());
         // Stop when we've reached our (uncapped if stop_at) target,
-        // OR crossed the stop_at floor — whichever happens first.
+        // crossed the stop_at floor, or hit a known tag (incremental).
         if out.len() >= effective_target { break; }
         if crossed_stop { break; }
+        if crossed_known { break; }
     }
     Ok(out)
 }
@@ -244,7 +272,7 @@ pub async fn get_release(tag: &str) -> Result<Release> {
     // all-channels filter so install-by-tag works regardless of the GUI's
     // current display preference.
     let any = ChannelFilter { release: true, beta: true, nightly: true };
-    list_releases_streaming(500, None, None, any, |_| {}).await?
+    list_releases_streaming(500, None, None, any, None, |_| {}).await?
         .into_iter()
         .find(|r| r.tag == tag)
         .ok_or_else(|| anyhow!("release tag not found: {tag}"))

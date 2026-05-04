@@ -345,6 +345,29 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
                 ui.end_row();
 
+                ui.label("Incremental release cache:").on_hover_text(
+                    "Persist every release we've ever fetched into sqlite \
+                     and break out of pagination as soon as we re-encounter \
+                     a known tag. After the first deep walk, subsequent \
+                     fetches only paginate the few pages newer than the \
+                     latest cached tag — much friendlier to GitHub's rate \
+                     limit when bisecting against older releases. Off by \
+                     default; safe to enable / disable at any time.");
+                ui.horizontal(|ui| {
+                    let prev = state.incremental_release_cache;
+                    ui.checkbox(&mut state.incremental_release_cache, "Enabled");
+                    if prev != state.incremental_release_cache {
+                        state.config_dirty = true;
+                        crate::console::info(&state.console, "config",
+                            if state.incremental_release_cache {
+                                "incremental release cache: enabled".to_string()
+                            } else {
+                                "incremental release cache: disabled".to_string()
+                            });
+                    }
+                });
+                ui.end_row();
+
                 ui.label("GitHub token:").on_hover_text(
                     "Optional — bumps anonymous 60 req/hr to 5,000 req/hr. \
                      https://github.com/settings/tokens (no scopes needed).");
@@ -764,6 +787,24 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // message below when filters hide everything.
         let mut shown = 0usize;
         let mut oldest: Option<&str> = None;
+        // Client-side channel filter — needed because incremental cache
+        // mode pulls all channels from GitHub regardless of the user's
+        // checkbox selection (so the cache grows uniformly and switching
+        // channels later doesn't trigger a re-walk). Without this filter
+        // a user with only "Nightly" ticked would still see Release/Beta
+        // rows from older fetches. Capture flags as locals so the helper
+        // doesn't keep an immutable borrow on `state` across the row
+        // loop's mutable uses.
+        let (ch_release, ch_beta, ch_nightly) =
+            (state.channel_release, state.channel_beta, state.channel_nightly);
+        let pass_channel = move |r: &super::state::ReleaseRow| -> bool {
+            match r.channel.as_str() {
+                "Release" => ch_release,
+                "Beta"    => ch_beta,
+                "Nightly" => ch_nightly,
+                _ => true, // unknown channel — don't hide
+            }
+        };
         for r in &rows {
             if let Some(o) = oldest {
                 if r.published_at.as_str() < o { oldest = Some(&r.published_at); }
@@ -772,7 +813,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             }
             let pass_installer = !(state.hide_no_installer && r.host_asset.is_none());
             let pass_date      = date_in_range(&r.published_at, state.date_from, state.date_to);
-            if pass_installer && pass_date { shown += 1; }
+            if pass_installer && pass_date && pass_channel(r) { shown += 1; }
         }
         if !rows.is_empty() && shown == 0 {
             let oldest_short = oldest.map(short_date).unwrap_or_default();
@@ -871,6 +912,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         for r in &rows {
             if state.hide_no_installer && r.host_asset.is_none() { continue; }
             if !date_in_range(&r.published_at, state.date_from, state.date_to) { continue; }
+            if !pass_channel(r) { continue; }
             ui.horizontal(|ui| {
                 // Reserve a fixed-width cell, then place the widget inside.
                 // `scope` lets us set a min_size without bleeding into the
@@ -1466,15 +1508,26 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
     // fetcher halts once it has reached that date — saves API calls when
     // the user only cares about a recent date window.
     let stop_at       = state.date_from;
-    let filter        = versions::github::ChannelFilter {
-        release: state.channel_release,
-        beta:    state.channel_beta,
-        nightly: state.channel_nightly,
+    // Incremental mode: fetch ALL channels (filter applied client-side
+    // only) so the cache always grows uniformly and switching channels
+    // later doesn't require a re-fetch. Off mode keeps the GUI's
+    // current channel filter as the server-side filter.
+    let incremental = state.incremental_release_cache;
+    let filter = if incremental {
+        versions::github::ChannelFilter { release: true, beta: true, nightly: true }
+    } else {
+        versions::github::ChannelFilter {
+            release: state.channel_release,
+            beta:    state.channel_beta,
+            nightly: state.channel_nightly,
+        }
     };
     state.rt.spawn(async move {
         let tok = if token.is_empty() { None } else { Some(token.as_str()) };
         // Helper: convert a Vec<github::Release> → Vec<ReleaseRow> for the GUI.
-        fn to_rows(rs: Vec<versions::github::Release>) -> Vec<ReleaseRow> {
+        // Also persists each row to sqlite `release_cache` when incremental
+        // mode is on, so future fetches can short-circuit on known tags.
+        fn to_rows(rs: Vec<versions::github::Release>, incremental: bool) -> Vec<ReleaseRow> {
             rs.into_iter().map(|r| {
                 let skip_reason = r.skip_reason();
                 let channel = match versions::github::detect_release_channel(&r) {
@@ -1487,11 +1540,6 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     .map(|a| (Some(a.browser_download_url.clone()), Some(a.size)))
                     .unwrap_or((None, None));
                 let chromium_version = parse_chromium_version(&r.name);
-                // Persist tag metadata so brackets that point at tags
-                // outside the currently-fetched window can still find a
-                // pinned Chromium version + date. Best-effort: any sqlite
-                // error is silently ignored — this is just a fallback
-                // cache, not authoritative.
                 let _ = verdict::upsert_tag_metadata(
                     &r.tag,
                     chromium_version.as_deref(),
@@ -1509,17 +1557,37 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     chromium_version,
                 };
                 row.refresh_cached();
+                if incremental {
+                    if let Ok(json) = serde_json::to_string(&row) {
+                        let _ = verdict::upsert_release_cache_row(&row.tag, &json);
+                    }
+                }
                 row
             }).collect()
         }
         // Stream each page of results into the partial slot. The GUI's
         // drain loop picks them up between frames and re-renders.
-        let result = versions::github::list_nightly_releases_streaming(count, tok, stop_at, filter, |partial| {
-            let rows = to_rows(partial);
-            *partial_slot.lock().unwrap() = Some(rows);
-        }).await
-            .map(to_rows)
-            .map_err(|e| e.to_string());
+        let known = if incremental { verdict::known_release_cache_tags() }
+                    else           { Default::default() };
+        let result = if incremental {
+            versions::github::list_nightly_releases_streaming_incremental(
+                count, tok, stop_at, filter, &known,
+                |partial| {
+                    let rows = to_rows(partial, incremental);
+                    *partial_slot.lock().unwrap() = Some(rows);
+                }).await
+                .map(|rs| to_rows(rs, incremental))
+                .map_err(|e| e.to_string())
+        } else {
+            versions::github::list_nightly_releases_streaming(
+                count, tok, stop_at, filter,
+                |partial| {
+                    let rows = to_rows(partial, incremental);
+                    *partial_slot.lock().unwrap() = Some(rows);
+                }).await
+                .map(|rs| to_rows(rs, incremental))
+                .map_err(|e| e.to_string())
+        };
         *slot.lock().unwrap() = Some(result);
     });
 }

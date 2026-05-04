@@ -52,6 +52,13 @@ pub struct Gui {
     /// state-corrupted profiles when bisecting regressions. Off by
     /// default; ignored when a per-row user_data_dir is set.
     #[serde(default)] pub clean_profile_per_launch: bool,
+    /// When true, every release we ever fetch is persisted to a sqlite
+    /// `release_cache` table. Subsequent fetches break out of
+    /// pagination as soon as they hit a tag we already know about, so
+    /// re-fetching after picking a deep date range only walks the few
+    /// pages newer than the latest cached tag — instead of walking
+    /// every release in between every time.
+    #[serde(default)] pub incremental_release_cache: bool,
 }
 
 fn default_true() -> bool { true }
@@ -76,6 +83,7 @@ impl Default for Gui {
             default_args_enabled: false,
             default_args: String::new(),
             clean_profile_per_launch: false,
+            incremental_release_cache: false,
         }
     }
 }

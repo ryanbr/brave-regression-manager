@@ -113,6 +113,10 @@ fn init_conn() -> Result<Connection> {
             published_at     TEXT,
             channel          TEXT
         );
+        CREATE TABLE IF NOT EXISTS release_cache (
+            tag  TEXT PRIMARY KEY,
+            json TEXT NOT NULL
+        );
     "#)?;
     Ok(conn)
 }
@@ -311,6 +315,46 @@ pub fn upsert_tag_metadata(
              channel          = COALESCE(excluded.channel,          tag_metadata.channel)",
         params![tag, chromium_version, published_at, channel])?;
     Ok(())
+}
+
+/// Persist a release row as a JSON blob keyed by tag. Used by the
+/// incremental release-cache mode so every release we've ever seen is
+/// remembered across sessions and an "early 2024" date filter doesn't
+/// re-paginate through 2025/2026 each time.
+pub fn upsert_release_cache_row(tag: &str, json: &str) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO release_cache(tag, json) VALUES (?1, ?2)
+         ON CONFLICT(tag) DO UPDATE SET json = excluded.json",
+        params![tag, json])?;
+    Ok(())
+}
+
+/// Read every release JSON blob, newest tag last (lexicographic — the
+/// caller re-sorts). Empty Vec when the table is empty / unreadable.
+pub fn all_release_cache_rows() -> Vec<String> {
+    let conn = match open() { Ok(c) => c, Err(_) => return Vec::new() };
+    let mut out = Vec::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT json FROM release_cache") {
+        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+            out.extend(rows.filter_map(|r| r.ok()));
+        }
+    }
+    out
+}
+
+/// Set of every tag currently stored in `release_cache`. Used by the
+/// fetcher's incremental mode to break out of pagination as soon as it
+/// re-encounters a tag we already know about.
+pub fn known_release_cache_tags() -> std::collections::HashSet<String> {
+    let conn = match open() { Ok(c) => c, Err(_) => return Default::default() };
+    let mut out = std::collections::HashSet::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT tag FROM release_cache") {
+        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+            out.extend(rows.filter_map(|r| r.ok()));
+        }
+    }
+    out
 }
 
 /// Read the persisted (chromium_version, published_at, channel) for a tag.

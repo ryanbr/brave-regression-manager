@@ -93,6 +93,7 @@ impl App {
         state.default_args_enabled        = cfg.gui.default_args_enabled;
         state.default_args                = cfg.gui.default_args.clone();
         state.clean_profile_per_launch    = cfg.gui.clean_profile_per_launch;
+        state.incremental_release_cache   = cfg.gui.incremental_release_cache;
         // Guard against an all-off persisted state — default back to Nightly.
         if !state.channel_release && !state.channel_beta && !state.channel_nightly {
             state.channel_nightly = true;
@@ -106,6 +107,24 @@ impl App {
             // appeared) since the cache was written.
             let mut rows = cache.rows;
             for r in &mut rows { r.refresh_cached(); r.ensure_channel(); }
+            // Incremental mode: union with the persistent sqlite
+            // release_cache so the GUI starts up with the full known
+            // history immediately (releases.json holds the last fetch's
+            // window only — sqlite holds everything we've ever seen).
+            if state.incremental_release_cache {
+                use std::collections::HashMap;
+                let mut by_tag: HashMap<String, super::state::ReleaseRow> =
+                    rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
+                for json in crate::verdict::all_release_cache_rows() {
+                    if let Ok(mut r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
+                        r.refresh_cached();
+                        r.ensure_channel();
+                        by_tag.entry(r.tag.clone()).or_insert(r);
+                    }
+                }
+                rows = by_tag.into_values().collect();
+                rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+            }
             // If the cache predates channel persistence (or held marker-less
             // zips), some rows now read `?`. Fire a single background re-fetch
             // so the live `detect_release_channel` can fill them in from the
@@ -139,6 +158,7 @@ impl App {
         cfg.gui.default_args_enabled        = self.state.default_args_enabled;
         cfg.gui.default_args                = self.state.default_args.clone();
         cfg.gui.clean_profile_per_launch    = self.state.clean_profile_per_launch;
+        cfg.gui.incremental_release_cache   = self.state.incremental_release_cache;
         if let Err(e) = cfg.save(&paths::config_path()) {
             self.state.status_msg = format!("settings save failed: {e}");
         }
@@ -176,7 +196,28 @@ impl App {
         if let Some(res) = self.state.slots.available.lock().unwrap().take() {
             self.state.fetching_releases = false;
             match res {
-                Ok(rows) => {
+                Ok(mut rows) => {
+                    // Incremental mode: the fetch only returned NEW rows
+                    // (it broke pagination as soon as it hit a known
+                    // tag). Merge with everything already in the sqlite
+                    // release_cache so state.available reflects the full
+                    // history, not just the delta. Without this, a
+                    // post-incremental render would shrink to "today's
+                    // few new tags" instead of showing the full window.
+                    if self.state.incremental_release_cache {
+                        use std::collections::HashMap;
+                        let mut by_tag: HashMap<String, super::state::ReleaseRow> =
+                            rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
+                        for json in crate::verdict::all_release_cache_rows() {
+                            if let Ok(r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
+                                by_tag.entry(r.tag.clone()).or_insert(r);
+                            }
+                        }
+                        rows = by_tag.into_values().collect();
+                        // Newest-first by published_at — matches the
+                        // ordering GitHub returns natively.
+                        rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+                    }
                     let installable = rows.iter().filter(|r| r.host_asset.is_some()).count();
                     let msg = format!("fetched {} tags ({installable} installable on this platform)", rows.len());
                     console::info(&self.state.console, "github", &msg);
