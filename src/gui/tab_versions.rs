@@ -997,7 +997,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         let rows = state.available.clone();
         let installing_now = state.installing.clone();
         if rows.is_empty() && !state.fetching_releases {
-            super::app::weak_label(ui, "(click \"Fetch GitHub releases\" to populate)");
+            if state.loading_startup_cache {
+                super::app::weak_label(ui, "(loading cache from disk…)");
+            } else {
+                super::app::weak_label(ui, "(click \"Fetch GitHub releases\" to populate)");
+            }
         }
         // Compute how many rows actually clear the active filters and the
         // oldest cached release date — used for the helpful empty-results

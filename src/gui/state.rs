@@ -58,6 +58,11 @@ pub struct AsyncSlots {
     /// to state.available + sqlite when the user manually requests a
     /// specific tag from the GitHub API.
     pub add_by_tag_done: AsyncSlot<ReleaseRow>,
+    /// Result of the background startup-cache load (releases.json +
+    /// sqlite incremental merge). Populated once shortly after the
+    /// first frame so the window paints immediately and the heavy
+    /// JSON parse + merge happens on a worker thread.
+    pub startup_cache_done: AsyncSlot<(Vec<ReleaseRow>, Option<chrono::DateTime<chrono::Utc>>)>,
 }
 
 /// Latest in-flight download snapshot for the current install (if any).
@@ -195,6 +200,11 @@ pub struct AppState {
     /// Wall-clock at install spawn — used by the install-completion
     /// drain to format a "in N.Ns" duration in the post-install line.
     pub installing_started: Option<std::time::Instant>,
+    /// True while the deferred startup cache load is still in flight.
+    /// Suppresses the "(click Fetch GitHub releases to populate)"
+    /// empty-state message during the brief window between window-show
+    /// and the cache landing in `state.available`.
+    pub loading_startup_cache: bool,
     pub selected_tag: Option<String>,
 
     /// Sort column + direction for the Available list. Session-only —
@@ -301,6 +311,7 @@ impl AppState {
             fetching_started: None,
             installing: None,
             installing_started: None,
+            loading_startup_cache: false,
             selected_tag: None,
             avail_sort_by:  AvailSortColumn::Date,
             avail_sort_asc: false,

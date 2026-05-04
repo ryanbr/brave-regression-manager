@@ -213,41 +213,42 @@ impl App {
             prof_dir, def_args,
             state.clean_profile_per_launch, state.incremental_release_cache,
             state.launch_as_admin, token_str));
-        // Restore the on-disk releases cache so installs can go direct to S3
-        // immediately on launch without re-querying the GitHub API.
-        if let Some(cache) = ReleaseCache::load() {
-            // Recompute `cached` at startup — the .zip / .exe in the
-            // downloads dir might have been removed (or, more usefully,
-            // appeared) since the cache was written.
-            let mut rows = cache.rows;
-            for r in &mut rows { r.refresh_cached(); r.ensure_channel(); }
-            // Incremental mode: union with the persistent sqlite
-            // release_cache so the GUI starts up with the full known
-            // history immediately (releases.json holds the last fetch's
-            // window only — sqlite holds everything we've ever seen).
-            if state.incremental_release_cache {
-                use std::collections::HashMap;
-                let mut by_tag: HashMap<String, super::state::ReleaseRow> =
-                    rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
-                for json in crate::verdict::all_release_cache_rows() {
-                    if let Ok(mut r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
-                        r.refresh_cached();
-                        r.ensure_channel();
-                        by_tag.entry(r.tag.clone()).or_insert(r);
+        // Defer the heavy startup work — releases.json read + JSON
+        // parse + (incremental) sqlite merge — to a background tokio
+        // task so the window paints immediately. Drain block in
+        // drain_async_results below picks up the result and populates
+        // state.available on the next frame.
+        state.loading_startup_cache = true;
+        let slot       = state.slots.startup_cache_done.clone();
+        let incremental = state.incremental_release_cache;
+        state.rt.spawn(async move {
+            // tokio::task::spawn_blocking would be more correct for
+            // pure-CPU/disk work, but spawn here keeps the dependency
+            // surface tiny and the load is short.
+            let mut payload: (Vec<super::state::ReleaseRow>,
+                              Option<chrono::DateTime<chrono::Utc>>)
+                = (Vec::new(), None);
+            if let Some(cache) = ReleaseCache::load() {
+                let mut rows = cache.rows;
+                for r in &mut rows { r.refresh_cached(); r.ensure_channel(); }
+                if incremental {
+                    use std::collections::HashMap;
+                    let mut by_tag: HashMap<String, super::state::ReleaseRow> =
+                        rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
+                    for json in crate::verdict::all_release_cache_rows() {
+                        if let Ok(mut r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
+                            r.refresh_cached();
+                            r.ensure_channel();
+                            by_tag.entry(r.tag.clone()).or_insert(r);
+                        }
                     }
+                    rows = by_tag.into_values().collect();
+                    rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                 }
-                rows = by_tag.into_values().collect();
-                rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+                payload = (rows, Some(cache.fetched_at));
             }
-            // If the cache predates channel persistence (or held marker-less
-            // zips), some rows now read `?`. Fire a single background re-fetch
-            // so the live `detect_release_channel` can fill them in from the
-            // full asset list. Skips when everything's already labelled.
-            let needs_refetch = rows.iter().any(|r| r.channel == "?" || r.channel.is_empty());
-            state.available = std::sync::Arc::new(rows);
-            state.available_fetched_at = Some(cache.fetched_at);
-            if needs_refetch { tab_versions::spawn_fetch(&mut state); }
-        }
+            *slot.lock().unwrap() = Some(Ok(payload));
+        });
         state.profiles  = crate::profile::list().unwrap_or_default()
             .into_iter().map(|p| p.name).collect();
         Self { state, initial_size_applied: false }
@@ -312,6 +313,22 @@ impl App {
     }
 
     fn drain_async_results(&mut self) {
+        // Deferred startup-cache load result — first frame paints
+        // immediately, this populates state.available a tick or two
+        // later. Also fires a refetch when any cached row has a
+        // missing/`?` channel marker (legacy caches from before the
+        // channel column existed).
+        let cache_taken = self.state.slots.startup_cache_done.lock().unwrap().take();
+        if let Some(res) = cache_taken {
+            self.state.loading_startup_cache = false;
+            if let Ok((rows, fetched_at)) = res {
+                let needs_refetch = rows.iter()
+                    .any(|r| r.channel == "?" || r.channel.is_empty());
+                self.state.available = std::sync::Arc::new(rows);
+                self.state.available_fetched_at = fetched_at;
+                if needs_refetch { tab_versions::spawn_fetch(&mut self.state); }
+            }
+        }
         // Mid-flight partial fetch results — stream into the available
         // list as each page lands so the UI shows progress instead of a
         // blank "fetching…" wait.
@@ -522,6 +539,7 @@ impl eframe::App for App {
         } else if self.state.fetching_releases || self.state.seeding || self.state.applying
             || !self.state.compare_loading.is_empty()
             || !self.state.tag_fetch_pending.is_empty()
+            || self.state.loading_startup_cache
             || self.state.adding_by_tag
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
