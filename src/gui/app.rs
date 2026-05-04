@@ -99,6 +99,7 @@ impl App {
             state.channel_nightly = true;
         }
         state.installed = crate::versions::list_installed().unwrap_or_default();
+        state.manual_release_tags = crate::verdict::manual_release_tags();
         // Restore the on-disk releases cache so installs can go direct to S3
         // immediately on launch without re-querying the GitHub API.
         if let Some(cache) = ReleaseCache::load() {
@@ -291,6 +292,30 @@ impl App {
                 }
             }
         }
+        if let Some(res) = self.state.slots.add_by_tag_done.lock().unwrap().take() {
+            self.state.adding_by_tag = false;
+            match res {
+                Ok(row) => {
+                    let tag = row.tag.clone();
+                    self.state.available.retain(|r| r.tag != tag);
+                    self.state.available.push(row);
+                    self.state.available.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+                    // Mark this tag as user-added so the per-row channel
+                    // filter exempts it — adding a Release tag while the
+                    // GUI shows Nightly only should still display it.
+                    self.state.manual_release_tags.insert(tag.clone());
+                    let _ = crate::verdict::mark_manual_release(&tag);
+                    console::info(&self.state.console, "github",
+                        format!("added release by tag: {tag}"));
+                    self.state.status_msg = format!("added {tag}");
+                }
+                Err(e) => {
+                    console::error(&self.state.console, "github",
+                        format!("add by tag failed: {e}"));
+                    self.state.status_msg = format!("add by tag failed: {e}");
+                }
+            }
+        }
         let tag_drained: Vec<_> = std::mem::take(
             &mut *self.state.slots.tag_metadata_done.lock().unwrap());
         for (tag, res) in tag_drained {
@@ -349,6 +374,7 @@ impl eframe::App for App {
         } else if self.state.fetching_releases || self.state.seeding || self.state.applying
             || !self.state.compare_loading.is_empty()
             || !self.state.tag_fetch_pending.is_empty()
+            || self.state.adding_by_tag
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         } else if !self.state.running.is_empty() {

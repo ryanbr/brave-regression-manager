@@ -117,6 +117,9 @@ fn init_conn() -> Result<Connection> {
             tag  TEXT PRIMARY KEY,
             json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS manual_release_tags (
+            tag TEXT PRIMARY KEY
+        );
     "#)?;
     Ok(conn)
 }
@@ -336,6 +339,42 @@ pub fn all_release_cache_rows() -> Vec<String> {
     let conn = match open() { Ok(c) => c, Err(_) => return Vec::new() };
     let mut out = Vec::new();
     if let Ok(mut stmt) = conn.prepare("SELECT json FROM release_cache") {
+        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+            out.extend(rows.filter_map(|r| r.ok()));
+        }
+    }
+    out
+}
+
+/// Mark a tag as user-added (via the "Add release by tag" UI). Used to
+/// exempt the row from the channel display filter — when the user
+/// explicitly pulls a Release/Beta tag they expect to see it even if
+/// only Nightly is ticked.
+pub fn mark_manual_release(tag: &str) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO manual_release_tags(tag) VALUES (?1) ON CONFLICT(tag) DO NOTHING",
+        params![tag])?;
+    Ok(())
+}
+
+/// Remove a tag from both `manual_release_tags` and `release_cache` —
+/// used when the user clicks Remove on a manually added row. We delete
+/// from both tables so the row disappears entirely from state.available
+/// on the next render, not just loses its channel-filter exemption.
+pub fn unmark_manual_release(tag: &str) -> Result<()> {
+    let conn = open()?;
+    conn.execute("DELETE FROM manual_release_tags WHERE tag=?1", params![tag])?;
+    conn.execute("DELETE FROM release_cache       WHERE tag=?1", params![tag])?;
+    Ok(())
+}
+
+/// Set of tags the user has explicitly added via the manual Add-by-tag
+/// flow. Loaded at startup; live-updated when Add succeeds.
+pub fn manual_release_tags() -> std::collections::HashSet<String> {
+    let conn = match open() { Ok(c) => c, Err(_) => return Default::default() };
+    let mut out = std::collections::HashSet::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT tag FROM manual_release_tags") {
         if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
             out.extend(rows.filter_map(|r| r.ok()));
         }

@@ -113,7 +113,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         state.status_msg = "relaunched".into();
                     }
                     Err(e) => {
-                        let msg = format!("launch failed: {e:#}");
+                        let raw = format!("{e:#}");
+                        let msg = match super::tab_versions::launch_failure_hint(&raw) {
+                            Some(h) => format!("launch failed: {raw}\nhint: {h}"),
+                            None    => format!("launch failed: {raw}"),
+                        };
                         crate::console::error(&state.console, "launch", &msg);
                         state.status_msg = msg;
                     }

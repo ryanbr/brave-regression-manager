@@ -537,7 +537,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             state.status_msg = msg;
                         }
                         Err(e) => {
-                            let msg = format!("launch failed: {e:#}");
+                            let raw = format!("{e:#}");
+                            let msg = match launch_failure_hint(&raw) {
+                                Some(h) => format!("launch failed: {raw}\nhint: {h}"),
+                                None    => format!("launch failed: {raw}"),
+                            };
                             crate::console::error(&state.console, "launch", &msg);
                             state.status_msg = msg;
                         }
@@ -769,6 +773,36 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         });
     });
 
+    // ── Add release by tag — single-call manual fetch ───────────────────
+    // For pulling a specific older release (e.g. v1.85.99) without
+    // walking pagination back to it. One API call to releases/tags/<tag>;
+    // the row is upserted into state.available + the persistent cache.
+    ui.horizontal(|ui| {
+        super::app::weak_label(ui, "Add release by tag:");
+        ui.add(egui::TextEdit::singleline(&mut state.add_by_tag_buf)
+            .desired_width(140.0)
+            .hint_text("v1.85.99"));
+        let raw = state.add_by_tag_buf.trim().to_string();
+        let can_add = !raw.is_empty() && !state.adding_by_tag;
+        let label = if state.adding_by_tag { "Adding…" } else { "Add" };
+        if ui.add_enabled(can_add, egui::Button::new(label))
+            .on_hover_text(
+                "Pull this exact tag's metadata from GitHub in a single \
+                 API call (no pagination). The result is added to the \
+                 Available list and persisted to the sqlite cache so it \
+                 survives across sessions.")
+            .clicked()
+        {
+            // Brave tags are `vMAJOR.MINOR.PATCH`. Normalise the user's
+            // input: strip any leading `v`/`V` they may have typed, then
+            // prefix exactly one lowercase `v`. Handles `v1.91.119`,
+            // `V1.91.119`, and bare `1.91.119` identically.
+            let bare = raw.trim_start_matches(|c: char| c == 'v' || c == 'V');
+            let tag = format!("v{bare}");
+            spawn_add_by_tag(state, tag);
+        }
+    });
+
     // Fill remaining vertical space so a tall window doesn't show a big
     // empty band below this panel.
     egui::ScrollArea::vertical().id_source("avail")
@@ -792,15 +826,17 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         let mut oldest: Option<&str> = None;
         // Client-side channel filter — needed because incremental cache
         // mode pulls all channels from GitHub regardless of the user's
-        // checkbox selection (so the cache grows uniformly and switching
-        // channels later doesn't trigger a re-walk). Without this filter
-        // a user with only "Nightly" ticked would still see Release/Beta
-        // rows from older fetches. Capture flags as locals so the helper
-        // doesn't keep an immutable borrow on `state` across the row
-        // loop's mutable uses.
+        // checkbox selection. Manually-added tags (via the Add-by-tag
+        // flow) are exempted: when the user explicitly pulled v1.85.99
+        // they expect to see it even if only Nightly is ticked. Capture
+        // flags + the manual-set as locals so the helper doesn't keep
+        // an immutable borrow on `state` across the row loop's mutable
+        // uses.
         let (ch_release, ch_beta, ch_nightly) =
             (state.channel_release, state.channel_beta, state.channel_nightly);
+        let manual_tags = state.manual_release_tags.clone();
         let pass_channel = move |r: &super::state::ReleaseRow| -> bool {
+            if manual_tags.contains(&r.tag) { return true; }
             match r.channel.as_str() {
                 "Release" => ch_release,
                 "Beta"    => ch_beta,
@@ -918,14 +954,30 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
         // Apply the active sort to a fresh row order. Sorting happens on
         // the rendered slice only — the cached `state.available` keeps
-        // GitHub's published order so a re-fetch isn't needed.
+        // GitHub's published order so a re-fetch isn't needed. Then
+        // promote manually-added tags to the top so they're easy to
+        // find regardless of the user's current sort key, with a
+        // separator drawn between the manual block and the rest.
         let mut rows = rows;
         sort_available_rows(&mut rows, state.avail_sort_by, state.avail_sort_asc);
+        rows.sort_by_key(|r| !state.manual_release_tags.contains(&r.tag));
 
+        // Manually-added tags also bypass the date filter — if the user
+        // explicitly asked for v1.46.66 they shouldn't have to widen
+        // their date range to see it. Channel filter is already bypassed
+        // by `pass_channel`'s manual-tag check.
+        let mut last_was_manual = false;
         for r in &rows {
+            let is_manual = state.manual_release_tags.contains(&r.tag);
             if state.hide_no_installer && r.host_asset.is_none() { continue; }
-            if !date_in_range(&r.published_at, state.date_from, state.date_to) { continue; }
+            if !is_manual && !date_in_range(&r.published_at, state.date_from, state.date_to) { continue; }
             if !pass_channel(r) { continue; }
+            // Draw a separator the moment we transition from the manual
+            // block to the regular fetched block.
+            if last_was_manual && !is_manual {
+                ui.separator();
+            }
+            last_was_manual = is_manual;
             ui.horizontal(|ui| {
                 // Reserve a fixed-width cell, then place the widget inside.
                 // `scope` lets us set a min_size without bleeding into the
@@ -938,7 +990,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     });
                 };
 
-                fixed_cell(ui, COL_TAG, &mut |ui| { ui.monospace(&r.tag); });
+                fixed_cell(ui, COL_TAG, &mut |ui| {
+                    // Cyan-ish for manually-added tags so they pop out
+                    // of the list. Picked to sit clear of every other
+                    // tag/text colour we use (verdict greens/reds, the
+                    // green asset-name label, the blue [cached] pill,
+                    // the channel pill colours).
+                    if is_manual {
+                        ui.label(RichText::new(&r.tag).monospace().strong()
+                            .color(Color32::from_rgb(120, 220, 230)));
+                    } else {
+                        ui.monospace(&r.tag);
+                    }
+                });
                 fixed_cell(ui, COL_DATE, &mut |ui| {
                     ui.label(short_date(&r.published_at));
                 });
@@ -984,10 +1048,60 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 let installed = versions::is_installed(&r.tag);
                 let busy = installing_now.as_deref() == Some(r.tag.as_str());
 
+                // Status/action cell. For manually-added rows, the
+                // Remove button is rendered inside the same fixed-width
+                // slot as Install so it doesn't push into the Comments
+                // column.
                 ui.scope(|ui| {
                     ui.set_min_width(COL_STATUS);
                     ui.set_max_width(COL_STATUS);
-                    render_status_cell(ui, state, r, installed, busy);
+                    ui.horizontal(|ui| {
+                        render_status_cell(ui, state, r, installed, busy);
+                        if is_manual && ui.button("Remove")
+                            .on_hover_text(
+                                "Remove this manually-added tag from the \
+                                 Available list AND uninstall the on-disk \
+                                 version (if any). Verdicts and notes are \
+                                 preserved in sqlite — re-adding the tag \
+                                 later will pick them back up.")
+                            .clicked()
+                        {
+                            let tag = r.tag.clone();
+                            // Stop a running Brave for this tag first so
+                            // we can remove the version dir without a
+                            // file-in-use error on Windows.
+                            if let Some(mut running) = state.running.remove(&tag) {
+                                versions::launch::force_kill_tree(running.child.id());
+                                let _ = running.child.kill();
+                                let _ = running.child.wait();
+                            }
+                            // Uninstall the on-disk version if present.
+                            let dir = crate::paths::version_dir(&tag);
+                            let mut uninstall_note = String::new();
+                            if dir.exists() {
+                                if let Err(e) = std::fs::remove_dir_all(&dir) {
+                                    uninstall_note = format!(" (uninstall failed: {e})");
+                                    crate::console::error(&state.console, "uninstall",
+                                        format!("{tag}: {e:#}"));
+                                } else {
+                                    uninstall_note = " + uninstalled".to_string();
+                                    state.installed = versions::list_installed()
+                                        .unwrap_or_default();
+                                }
+                            }
+                            state.manual_release_tags.remove(&tag);
+                            state.available.retain(|x| x.tag != tag);
+                            if let Err(e) = verdict::unmark_manual_release(&tag) {
+                                crate::console::error(&state.console, "manual",
+                                    format!("remove {tag} failed: {e:#}"));
+                                state.status_msg = format!("remove failed: {e}");
+                            } else {
+                                crate::console::info(&state.console, "manual",
+                                    format!("removed manual tag {tag}{uninstall_note}"));
+                                state.status_msg = format!("removed {tag}{uninstall_note}");
+                            }
+                        }
+                    });
                 });
 
                 // Comments cell — full note body shown to the right of the
@@ -1440,6 +1554,52 @@ fn render_compare_one(
                 });
             }
         });
+    });
+}
+
+/// One-shot fetch of a full release by tag — single API call, no
+/// pagination. Result lands in `slots.add_by_tag_done` for app.rs to
+/// merge into state.available; also upserted to sqlite when
+/// incremental cache mode is on so the row sticks across sessions.
+fn spawn_add_by_tag(state: &mut AppState, tag: String) {
+    state.adding_by_tag = true;
+    state.status_msg = format!("fetching release by tag: {tag}…");
+    let token = state.github_token.clone();
+    let slot  = state.slots.add_by_tag_done.clone();
+    let incremental = state.incremental_release_cache;
+    state.rt.spawn(async move {
+        let tok = if token.is_empty() { None } else { Some(token.as_str()) };
+        let result = versions::github::fetch_release_by_tag(&tag, tok).await
+            .map_err(|e| format!("{e:#}"))
+            .map(|r| {
+                let skip_reason = r.skip_reason();
+                let channel = match versions::github::detect_release_channel(&r) {
+                    versions::github::Channel::Release => "Release",
+                    versions::github::Channel::Beta    => "Beta",
+                    versions::github::Channel::Nightly => "Nightly",
+                }.to_string();
+                let (asset_url, asset_size) = r.assets.iter()
+                    .find(|a| Some(&a.name) == r.host_asset.as_ref())
+                    .map(|a| (Some(a.browser_download_url.clone()), Some(a.size)))
+                    .unwrap_or((None, None));
+                let chromium_version = parse_chromium_version(&r.name);
+                let _ = verdict::upsert_tag_metadata(
+                    &r.tag, chromium_version.as_deref(),
+                    Some(&r.published_at), Some(&channel));
+                let mut row = ReleaseRow {
+                    tag: r.tag, published_at: r.published_at,
+                    host_asset: r.host_asset, asset_url, asset_size,
+                    skip_reason, cached: false, channel, chromium_version,
+                };
+                row.refresh_cached();
+                if incremental {
+                    if let Ok(json) = serde_json::to_string(&row) {
+                        let _ = verdict::upsert_release_cache_row(&row.tag, &json);
+                    }
+                }
+                row
+            });
+        *slot.lock().unwrap() = Some(result);
     });
 }
 
@@ -1941,6 +2101,40 @@ pub(crate) fn throwaway_profile_dir(tag: &str) -> std::path::PathBuf {
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
         .collect();
     crate::paths::profiles_dir().join(format!("throwaway-{safe_tag}-{stamp}"))
+}
+
+/// Pattern-match common launch-failure OS error strings and return a
+/// short actionable hint when we recognise one. Returns None when we
+/// don't have a known answer — the raw OS message stays visible either
+/// way, this is purely additive guidance.
+pub(super) fn launch_failure_hint(raw: &str) -> Option<&'static str> {
+    let lc = raw.to_lowercase();
+    // Windows ERROR_SXS_CANT_GEN_ACTCTX (14001) — old Brave needs an
+    // older VC++ Redistributable than the host has installed. Also
+    // matches the human-readable "side-by-side configuration" message.
+    if lc.contains("os error 14001") || lc.contains("side-by-side") {
+        return Some("install the Microsoft Visual C++ Redistributable \
+                     (vc_redist.x64.exe, latest 2015–2022) and reboot. \
+                     Very old Brave versions may also need the 2013 \
+                     redist: https://aka.ms/vs/17/release/vc_redist.x64.exe");
+    }
+    // Windows ERROR_EXE_MACHINE_TYPE_MISMATCH (216) — wrong-arch PE.
+    // The Install button now refuses these but very old already-installed
+    // versions on disk can still trip it.
+    if lc.contains("os error 216")
+        || lc.contains("not compatible with the version of windows")
+    {
+        return Some("the on-disk brave.exe is the wrong CPU architecture \
+                     for this host. Uninstall (Del), then re-install — \
+                     the picker now refuses cross-arch zips.");
+    }
+    // Windows ERROR_FILE_NOT_FOUND (2) — usually means brave.exe wasn't
+    // produced by extraction (missing top-level dir name change, etc.).
+    if lc.contains("os error 2") && lc.contains("brave") {
+        return Some("brave.exe is missing from the install directory. \
+                     Try uninstalling and re-installing the version.");
+    }
+    None
 }
 
 /// True when `asset_name` clearly targets the opposite CPU architecture

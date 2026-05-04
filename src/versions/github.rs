@@ -473,6 +473,49 @@ pub struct CompareResult {
     pub truncated: bool,
 }
 
+/// One-shot per-tag fetch of a full `Release` (name, published_at,
+/// prerelease, all assets) via the REST `releases/tags/<tag>` endpoint —
+/// **one** API call instead of paginating. Used by the GUI's "Add by
+/// tag" affordance so a user can pull a specific older release without
+/// walking back through every release in between.
+pub async fn fetch_release_by_tag(tag: &str, token: Option<&str>) -> Result<Release> {
+    let url = format!("https://api.github.com/repos/{OWNER}/{REPO}/releases/tags/{tag}");
+    let mut req = reqwest::Client::builder()
+        .user_agent("brave-regress")
+        .build()?
+        .get(&url)
+        .header("Accept", "application/vnd.github+json");
+    let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
+    if let Some(t) = chosen {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("github release {tag}: HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await?;
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let published_at = body.get("published_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let prerelease = body.get("prerelease").and_then(|v| v.as_bool()).unwrap_or(false);
+    let assets: Vec<ReleaseAsset> = body.get("assets")
+        .and_then(|v| v.as_array()).cloned().unwrap_or_default()
+        .into_iter().filter_map(|a| {
+            let n = a.get("name")?.as_str()?.to_string();
+            let s = a.get("size")?.as_u64()?;
+            let u = a.get("browser_download_url")?.as_str()?.to_string();
+            Some(ReleaseAsset { name: n, size: s, browser_download_url: u })
+        }).collect();
+    let mut candidate = Release {
+        tag: tag.to_string(),
+        name, published_at, prerelease, assets,
+        host_asset: None,
+    };
+    let channel = detect_release_channel(&candidate);
+    candidate.host_asset = pick_asset_for(&candidate, channel).ok().map(|a| a.name.clone());
+    Ok(candidate)
+}
+
 /// One-shot per-tag fetch of `brave/brave-browser` release metadata so the
 /// GUI can populate the pinned Chromium version + date for an installed
 /// tag that isn't in the currently-loaded available window. Single API

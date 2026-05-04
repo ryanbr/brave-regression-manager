@@ -54,6 +54,10 @@ pub struct AsyncSlots {
     /// override row to populate fields for tags outside the current
     /// fetch window.
     pub tag_metadata_done: TagMetaQueue,
+    /// One-shot "Add release by tag" result — single ReleaseRow added
+    /// to state.available + sqlite when the user manually requests a
+    /// specific tag from the GitHub API.
+    pub add_by_tag_done: AsyncSlot<ReleaseRow>,
 }
 
 /// Latest in-flight download snapshot for the current install (if any).
@@ -214,6 +218,16 @@ pub struct AppState {
     /// Tags whose one-shot metadata fetch is in-flight — used to disable
     /// the per-tag "Fetch tag info" button while the request is running.
     pub tag_fetch_pending: HashSet<String>,
+    /// Edit buffer for the "Add release by tag" field. Lets the user
+    /// pull a specific older release (e.g. `v1.85.99`) in a single API
+    /// call without walking pagination back to it.
+    pub add_by_tag_buf: String,
+    /// True while an Add-by-tag fetch is in flight.
+    pub adding_by_tag: bool,
+    /// Tags the user explicitly added via the Add-by-tag flow.
+    /// Exempted from the channel display filter so a manually-added
+    /// Release/Beta tag still shows when only Nightly is ticked.
+    pub manual_release_tags: HashSet<String>,
 
     /// Per-tag freeform-note editor. `Some(tag)` while the popup is open;
     /// the buffer holds the in-progress edit so it survives repaints.
@@ -260,7 +274,7 @@ impl AppState {
             default_args_enabled: false,
             default_args: String::new(),
             clean_profile_per_launch: false,
-            incremental_release_cache: false,
+            incremental_release_cache: true,
             fetching_releases: false,
             installing: None,
             selected_tag: None,
@@ -279,6 +293,9 @@ impl AppState {
             compare_errors:  HashMap::new(),
             chromium_overrides: HashMap::new(),
             tag_fetch_pending: HashSet::new(),
+            add_by_tag_buf: String::new(),
+            adding_by_tag: false,
+            manual_release_tags: HashSet::new(),
             editing_note_tag: None,
             editing_note_buf: String::new(),
             status_msg: String::new(),
