@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Brave-as-Chrome (anti-fingerprint)
 // @namespace    https://github.com/ryanbr/twitch-brave-fix
-// @version      1.4.0
+// @version      1.5.0
 // @description  Generalized derivative of TwitchAdSolutions' twitch-brave-fix that runs on every site. Hides navigator.brave (the canonical Brave detector — exposed even in Strict shields), rebrands navigator.userAgentData.brands / getHighEntropyValues so "Brave" becomes "Google Chrome", patches navigator.onLine to track real online/offline events instead of Brave's hardwired `false` (brave/brave-browser#38240), fabricates a plausible navigator.connection (NetworkInformation) object so sites checking `if (navigator.connection)` no longer see Brave's `undefined` (brave/brave-browser#44985), removes navigator.globalPrivacyControl (Brave-only, not in Chrome), and forces navigator.doNotTrack to null (Chrome's modern default) so DNT-checking sites don't flag the session. Network-level header spoofs (Sec-Ch-Ua) are NOT applied here — those would require per-site GM_xmlHttpRequest retry logic and are tightly coupled to each site's failure signature; use the original Twitch-specific script for that case. This script is JS-surface only and safe to run globally.
 // @author       https://github.com/ryanbr
 // @match        *://*/*
@@ -47,14 +47,71 @@
     // object that delegates to the real one but rebrands brand-bearing fields. The wrapper
     // is a plain object with getter shadows for the synchronous accessors and a wrapped
     // getHighEntropyValues that rebrands result.brands / result.fullVersionList.
+    // Two-layer defense:
+    //   1. Hook NavigatorUAData.prototype.brands / getHighEntropyValues / toJSON. Pages that
+    //      cached `const ua = navigator.userAgentData` BEFORE our document-start script ran
+    //      (timing race with Tampermonkey/Violentmonkey injection on Chromium) still read via
+    //      the prototype, so prototype hooks cover those cached references.
+    //   2. Replace navigator.userAgentData itself with a wrapper. Pages that read
+    //      `navigator.userAgentData.X` fresh on each access hit the wrapper directly. Defense
+    //      in depth in case the prototype hooks fail (sealed prototype).
+    const rebrand = (arr) => Array.isArray(arr)
+        ? arr.map(b => b.brand === 'Brave'
+            ? { brand: 'Google Chrome', version: b.version }
+            : b)
+        : arr;
+
+    // Layer 1: prototype-level hooks
     try {
         const realUaData = navigator.userAgentData;
         if (realUaData) {
-            const rebrand = (arr) => Array.isArray(arr)
-                ? arr.map(b => b.brand === 'Brave'
-                    ? { brand: 'Google Chrome', version: b.version }
-                    : b)
-                : arr;
+            const proto = Object.getPrototypeOf(realUaData);
+            // brands getter — wrap so every read calls original then rebrands.
+            try {
+                const desc = Object.getOwnPropertyDescriptor(proto, 'brands');
+                if (desc && typeof desc.get === 'function') {
+                    Object.defineProperty(proto, 'brands', {
+                        get() { return rebrand(desc.get.call(this)); },
+                        configurable: true,
+                    });
+                }
+            } catch (_e) { /* prototype frozen on this build */ }
+            // getHighEntropyValues method — wrap to rebrand result.brands and result.fullVersionList.
+            try {
+                const origGHEV = proto.getHighEntropyValues;
+                if (typeof origGHEV === 'function') {
+                    proto.getHighEntropyValues = function(hints) {
+                        return origGHEV.call(this, hints).then(result => {
+                            if (result && Array.isArray(result.brands))
+                                result.brands = rebrand(result.brands);
+                            if (result && Array.isArray(result.fullVersionList))
+                                result.fullVersionList = rebrand(result.fullVersionList);
+                            return result;
+                        });
+                    };
+                }
+            } catch (_e) { /* method non-writable */ }
+            // toJSON method — used by JSON.stringify(navigator.userAgentData).
+            try {
+                const origToJSON = proto.toJSON;
+                if (typeof origToJSON === 'function') {
+                    proto.toJSON = function() {
+                        const result = origToJSON.call(this);
+                        if (result && Array.isArray(result.brands))
+                            result.brands = rebrand(result.brands);
+                        return result;
+                    };
+                }
+            } catch (_e) { /* method non-writable */ }
+        }
+    } catch (_e) { /* getPrototypeOf failed — fall through to wrapper */ }
+
+    // Layer 2: instance-level wrapper. Captures the real instance once, exposes a fresh
+    // object that delegates and rebrands. With layer 1 active, the inner delegation calls
+    // already-rebranded paths, which is idempotent — rebranding "Google Chrome" → no-op.
+    try {
+        const realUaData = navigator.userAgentData;
+        if (realUaData) {
             const spoofedBrands = Object.freeze(rebrand(realUaData.brands).map(b => Object.freeze({ ...b })));
             const fakeUaData = {
                 get brands() { return spoofedBrands; },
@@ -70,8 +127,6 @@
                     });
                 },
                 toJSON() {
-                    // toJSON returns the low-entropy fields as a plain object — re-emit with
-                    // the spoofed brands. Used by JSON.stringify(navigator.userAgentData).
                     return {
                         brands: spoofedBrands,
                         mobile: realUaData.mobile,
@@ -84,7 +139,7 @@
                 configurable: true,
             });
         }
-    } catch (_e) { /* defineProperty rejected on this build — JS-surface unmaskable */ }
+    } catch (_e) { /* defineProperty rejected on this build */ }
 
     // navigator.onLine is hardwired to `false` in Brave regardless of actual network state
     // (brave/brave-browser#38240). Two harms: (1) it's a Brave fingerprint (always-false
