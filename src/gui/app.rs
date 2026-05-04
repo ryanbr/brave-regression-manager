@@ -468,7 +468,11 @@ impl App {
                     self.state.compare_results.insert(channel, cr);
                 }
                 Err(e) => {
-                    console::error(&self.state.console, "compare", format!("[{channel}] {e}"));
+                    let line = match fetch_failure_hint(&e) {
+                        Some(h) => format!("[{channel}] {e}\nhint: {h}"),
+                        None    => format!("[{channel}] {e}"),
+                    };
+                    console::error(&self.state.console, "compare", &line);
                     self.state.compare_results.remove(&channel);
                     self.state.compare_errors.insert(channel, e);
                 }
@@ -493,8 +497,11 @@ impl App {
                     self.state.status_msg = format!("added {tag}");
                 }
                 Err(e) => {
-                    console::error(&self.state.console, "github",
-                        format!("add by tag failed: {e}"));
+                    let line = match fetch_failure_hint(&e) {
+                        Some(h) => format!("add by tag failed: {e}\nhint: {h}"),
+                        None    => format!("add by tag failed: {e}"),
+                    };
+                    console::error(&self.state.console, "github", &line);
                     self.state.status_msg = format!("add by tag failed: {e}");
                 }
             }
@@ -509,8 +516,11 @@ impl App {
                         format!("fetched metadata for {tag}"));
                 }
                 Err(e) => {
-                    console::error(&self.state.console, "tag-meta",
-                        format!("[{tag}] {e}"));
+                    let line = match fetch_failure_hint(&e) {
+                        Some(h) => format!("[{tag}] {e}\nhint: {h}"),
+                        None    => format!("[{tag}] {e}"),
+                    };
+                    console::error(&self.state.console, "tag-meta", &line);
                 }
             }
         }

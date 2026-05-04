@@ -98,21 +98,38 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             crate::console::info(&state.console, "filter",
                 "date filter cleared");
         }
+        // Visually separate the custom (from/to combos + Clear) section
+        // from the Preset dropdown so the user can tell at a glance
+        // which control is which.
+        ui.separator();
+        let or_size = egui::TextStyle::Body.resolve(ui.style()).size + 2.0;
+        ui.label(RichText::new("or:").strong().size(or_size));
         // Preset clicks are an explicit single-action intent — auto-fetch
         // is fine here. The from/to combos are NOT auto-fetched: picking
         // just the year would otherwise immediately fire a fetch back to
         // January of that year before the user got to the month combo.
         // The user can still trigger a fetch via the explicit "Fetch
         // GitHub releases" button after editing the combos.
+        // Preset menu: replaces the row of 7d/30d/…/150d small buttons.
+        // Closed label always reads "Preset v" (ASCII v so it doesn't
+        // tofu on Windows); 7d is the default first item per the user's
+        // request. Each item, when clicked, applies its date window
+        // and triggers the auto-refetch path below.
         let mut preset_clicked: Option<&str> = None;
-        for (label, days) in [("7d", 7i64), ("30d", 30), ("60d", 60), ("90d", 90), ("120d", 120), ("150d", 150)] {
-            if ui.small_button(label).clicked() {
-                state.date_to   = Some(today);
-                state.date_from = Some(clamp_date(today - chrono::Duration::days(days)));
-                state.config_dirty = true;
-                preset_clicked = Some(label);
+        ui.menu_button("Preset v", |ui| {
+            for (label, days) in [
+                ("7d", 7i64), ("14d", 14), ("30d", 30), ("60d", 60),
+                ("90d", 90), ("120d", 120), ("150d", 150),
+            ] {
+                if ui.button(label).clicked() {
+                    state.date_to   = Some(today);
+                    state.date_from = Some(clamp_date(today - chrono::Duration::days(days)));
+                    state.config_dirty = true;
+                    preset_clicked = Some(label);
+                    ui.close_menu();
+                }
             }
-        }
+        });
         // Echo any date-filter change to the Console — preset name when
         // a quick-button was used, "custom" otherwise (year/month combo
         // edit). Useful when a fetch is misbehaving and you want to
