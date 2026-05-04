@@ -403,14 +403,16 @@ impl App {
                 }
             }
         }
-        if let Some(res) = self.state.slots.install_done.lock().unwrap().take() {
-            let elapsed = self.state.installing_started.take()
+        let install_drained: Vec<(String, Result<String, String>)> = std::mem::take(
+            &mut *self.state.slots.install_done.lock().unwrap());
+        for (tag, res) in install_drained {
+            let elapsed = self.state.installing_started.remove(&tag)
                 .map(|t| format!(" in {:.1}s", t.elapsed().as_secs_f64()))
                 .unwrap_or_default();
-            self.state.installing = None;
+            self.state.installing.remove(&tag);
             match res {
                 Ok(p)  => {
-                    let msg = format!("installed{elapsed} → {p}");
+                    let msg = format!("{tag} installed{elapsed} → {p}");
                     console::info(&self.state.console, "install", &msg);
                     self.state.status_msg = msg;
                     self.state.installed = crate::versions::list_installed().unwrap_or_default();
@@ -419,15 +421,13 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    // Append an actionable hint when the OS error or
-                    // GitHub HTTP code matches a pattern we recognise.
                     let hint = install_failure_hint(&e);
                     let msg = match hint {
-                        Some(h) => format!("{e}\nhint: {h}"),
-                        None    => e.clone(),
+                        Some(h) => format!("{tag}: {e}\nhint: {h}"),
+                        None    => format!("{tag}: {e}"),
                     };
                     console::error(&self.state.console, "install", &msg);
-                    self.state.status_msg = format!("install failed{elapsed}: {e}");
+                    self.state.status_msg = format!("{tag} install failed{elapsed}: {e}");
                 }
             }
         }
@@ -546,7 +546,7 @@ impl eframe::App for App {
         // While background work is in flight, keep repainting to surface the
         // result the moment it lands. While downloading specifically, repaint
         // faster so the progress bar / speed look live (every ~100ms).
-        if self.state.installing.is_some() {
+        if !self.state.installing.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if self.state.fetching_releases || self.state.seeding || self.state.applying
             || !self.state.compare_loading.is_empty()

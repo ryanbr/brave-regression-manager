@@ -10,6 +10,11 @@ use crate::lists::discover::EnabledList;
 use crate::versions::install::{DownloadProgress, ProgressSink};
 use crate::versions::InstalledVersion;
 
+/// Cap on how many parallel install tasks the GUI lets the user fire
+/// off. Three is enough to overlap network + extract waits without
+/// thrashing the disk or saturating GitHub's per-connection rate.
+pub const MAX_CONCURRENT_INSTALLS: usize = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tab { Versions, Lists, Console }
 
@@ -36,6 +41,11 @@ pub type CompareQueue = Arc<Mutex<Vec<(String, Result<crate::versions::github::C
 /// `Vec` rather than overwriting a single slot.
 pub type TagMetaQueue = Arc<Mutex<Vec<(String, Result<(), String>)>>>;
 
+/// Install completion queue: `(tag, Result<install_path, error>)`.
+/// Vec rather than a single slot so up to MAX_CONCURRENT_INSTALLS
+/// parallel installs can complete into the same frame.
+pub type InstallQueue = Arc<Mutex<Vec<(String, Result<String, String>)>>>;
+
 /// Async results that arrive from background tokio tasks.
 #[derive(Debug, Default, Clone)]
 pub struct AsyncSlots {
@@ -44,7 +54,8 @@ pub struct AsyncSlots {
     /// writes every page's cumulative output here so the GUI can render
     /// progressively instead of waiting for the full set.
     pub partial_releases: Arc<Mutex<Option<Vec<ReleaseRow>>>>,
-    pub install_done:     AsyncSlot<String>,
+    /// Queue of completed installs (see `InstallQueue`).
+    pub install_done:     InstallQueue,
     pub install_progress: ProgressSink,           // updated live during download
     pub seed_done:        AsyncSlot<()>,
     pub apply_done:       AsyncSlot<()>,
@@ -65,9 +76,12 @@ pub struct AsyncSlots {
     pub startup_cache_done: AsyncSlot<(Vec<ReleaseRow>, Option<chrono::DateTime<chrono::Utc>>)>,
 }
 
-/// Latest in-flight download snapshot for the current install (if any).
-pub fn current_progress(slots: &AsyncSlots) -> Option<DownloadProgress> {
-    slots.install_progress.lock().unwrap().clone()
+/// In-flight download snapshot for a specific tag's install. Returns
+/// `None` when that tag isn't currently downloading. Per-tag lookup
+/// avoids the flicker that the old single-Option sink produced when
+/// multiple parallel installs took turns writing it.
+pub fn progress_for(slots: &AsyncSlots, tag: &str) -> Option<DownloadProgress> {
+    slots.install_progress.lock().unwrap().get(tag).cloned()
 }
 
 /// Display row for the GUI's available-releases panel.
@@ -197,10 +211,14 @@ pub struct AppState {
     /// "in N.Ns" suffix on the completion line so the user can see how
     /// long the GitHub walk took. Cleared in the drain.
     pub fetching_started: Option<std::time::Instant>,
-    pub installing: Option<String>,
-    /// Wall-clock at install spawn — used by the install-completion
-    /// drain to format a "in N.Ns" duration in the post-install line.
-    pub installing_started: Option<std::time::Instant>,
+    /// Tags that have an install task currently in flight. Up to
+    /// `MAX_CONCURRENT_INSTALLS` may run at once; the Install button
+    /// disables itself once that cap is reached.
+    pub installing: HashSet<String>,
+    /// Per-tag spawn time for the in-flight installs — the completion
+    /// drain reads this to format a "in N.Ns" duration in the
+    /// post-install line.
+    pub installing_started: HashMap<String, std::time::Instant>,
     /// True while the deferred startup cache load is still in flight.
     /// Suppresses the "(click Fetch GitHub releases to populate)"
     /// empty-state message during the brief window between window-show
@@ -311,8 +329,8 @@ impl AppState {
             versions_dir: String::new(),
             fetching_releases: false,
             fetching_started: None,
-            installing: None,
-            installing_started: None,
+            installing: HashSet::new(),
+            installing_started: HashMap::new(),
             loading_startup_cache: false,
             selected_tag: None,
             avail_sort_by:  AvailSortColumn::Date,

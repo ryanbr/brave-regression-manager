@@ -1278,7 +1278,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 let installed = versions::is_installed(&r.tag);
-                let busy = installing_now.as_deref() == Some(r.tag.as_str());
+                let busy = installing_now.contains(&r.tag);
 
                 // Status/action cell. For manually-added rows, the
                 // Remove button is rendered inside the same fixed-width
@@ -1417,8 +1417,8 @@ fn render_status_cell(
                             RichText::new(name).color(Color32::from_rgb(60, 200, 90)))
                             .truncate(true))
                             .on_hover_text(format!("Asset: {name}"));
-                        let progress = super::state::current_progress(&state.slots);
-                        if let Some(p) = progress.filter(|p| p.tag == r.tag) {
+                        let progress = super::state::progress_for(&state.slots, &r.tag);
+                        if let Some(p) = progress {
                             let txt = format_progress_text(&p);
                             ui.add(egui::ProgressBar::new(p.fraction())
                                    .desired_width(180.0).show_percentage().text(txt));
@@ -1435,25 +1435,28 @@ fn render_status_cell(
                             ui.colored_label(Color32::from_rgb(140, 180, 220), "[cached]");
                         }
                         let btn_label = if r.cached { "Install (cached)" } else { "Install" };
-                        // Defensive arch check: a stale releases.json (cache
-                        // populated by the old, broken Windows picker) can
-                        // still hold a wrong-arch asset URL even after the
-                        // picker is fixed. Refuse to install — and show a
-                        // helpful tooltip — when the host_asset name is
-                        // obviously the opposite architecture from the host.
                         let arch_mismatch = is_opposite_arch_asset(name);
+                        let already_installing = installing_now.contains(&r.tag);
+                        let cap_reached = installing_now.len()
+                            >= super::state::MAX_CONCURRENT_INSTALLS;
                         let btn_resp = ui.add_enabled(
-                            installing_now.is_none() && !arch_mismatch,
+                            !already_installing && !cap_reached && !arch_mismatch,
                             egui::Button::new(btn_label));
                         let btn_resp = if arch_mismatch {
                             btn_resp.on_disabled_hover_text(
                                 "Cached asset URL is the wrong architecture for \
                                  this host. Click 'Fetch GitHub releases' to \
                                  refresh the cache, then re-install.")
+                        } else if cap_reached && !already_installing {
+                            btn_resp.on_disabled_hover_text(format!(
+                                "Already installing {} version(s) — wait for one to \
+                                 finish before starting another.",
+                                super::state::MAX_CONCURRENT_INSTALLS))
                         } else { btn_resp };
                         if btn_resp.clicked() {
-                            state.installing = Some(r.tag.clone());
-                            state.installing_started = Some(std::time::Instant::now());
+                            state.installing.insert(r.tag.clone());
+                            state.installing_started.insert(r.tag.clone(),
+                                std::time::Instant::now());
                             state.status_msg = format!("installing {}…", r.tag);
                             // Pre-install summary — confirms which asset is
                             // being pulled + the URL (copy-pasteable for
@@ -1465,7 +1468,11 @@ fn render_status_cell(
                                 r.asset_url.as_deref().unwrap_or("(no url)")));
                             let slot     = state.slots.install_done.clone();
                             let progress = state.slots.install_progress.clone();
-                            *progress.lock().unwrap() = None;
+                            // Per-tag map: clear THIS tag's entry so a
+                            // stale completed-state doesn't briefly
+                            // flash before the new download writes its
+                            // first sample. Other tags' entries stay.
+                            progress.lock().unwrap().remove(&r.tag);
                             let tag2     = r.tag.clone();
                             let name2    = name.clone();
                             let url      = r.asset_url.clone();
@@ -1482,7 +1489,7 @@ fn render_status_cell(
                                 };
                                 let result = result.map(|p| p.display().to_string())
                                                    .map_err(|e| format!("{e:#}"));
-                                *slot.lock().unwrap() = Some(result);
+                                slot.lock().unwrap().push((tag2, result));
                             });
                         }
                         if r.cached

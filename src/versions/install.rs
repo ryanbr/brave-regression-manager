@@ -36,7 +36,11 @@ impl DownloadProgress {
     }
 }
 
-pub type ProgressSink = Arc<Mutex<Option<DownloadProgress>>>;
+/// Live download progress for in-flight installs, keyed by tag so up
+/// to N parallel installs each get their own progress bar that doesn't
+/// flicker as the others write. The previous shape was a single Option
+/// slot, which made parallel downloads stomp each other every iteration.
+pub type ProgressSink = Arc<Mutex<std::collections::HashMap<String, DownloadProgress>>>;
 
 /// Download (with resume + sha) and extract a Nightly tag into its own folder.
 pub async fn install_tag(tag: &str) -> Result<PathBuf> {
@@ -88,7 +92,7 @@ pub async fn install_tag_with_asset_console(
         }
     }
     download(asset_url, &download_path, asset_size, tag, asset_name, sink.clone()).await?;
-    if let Some(s) = &sink { *s.lock().unwrap() = None; }
+    if let Some(s) = &sink { s.lock().unwrap().remove(tag); }
 
     let dest = paths::version_dir(tag);
     if dest.exists() { std::fs::remove_dir_all(&dest)?; }
@@ -142,7 +146,7 @@ async fn download(url: &str, dest: &Path, expected_size: u64,
         let meta = std::fs::metadata(dest)?;
         if meta.len() == expected_size {
             if let Some(s) = &sink {
-                *s.lock().unwrap() = Some(DownloadProgress {
+                s.lock().unwrap().insert(tag.to_string(), DownloadProgress {
                     tag: tag.into(), asset_name: asset_name.into(),
                     downloaded: expected_size, total: expected_size,
                     speed_bps: 0, started_at: Instant::now(),
@@ -176,7 +180,7 @@ async fn download(url: &str, dest: &Path, expected_size: u64,
                 tokio::fs::rename(&tmp, dest).await?;
                 if let Some(s) = &sink {
                     let downloaded = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(expected_size);
-                    *s.lock().unwrap() = Some(DownloadProgress {
+                    s.lock().unwrap().insert(tag.to_string(), DownloadProgress {
                         tag: tag.into(), asset_name: asset_name.into(),
                         downloaded, total: downloaded, speed_bps: 0, started_at,
                     });
@@ -243,7 +247,7 @@ async fn download_attempt(
     let sample_interval = Duration::from_millis(500);
 
     if let Some(s) = &sink {
-        *s.lock().unwrap() = Some(DownloadProgress {
+        s.lock().unwrap().insert(tag.to_string(), DownloadProgress {
             tag: tag.into(), asset_name: asset_name.into(),
             downloaded, total, speed_bps: 0, started_at,
         });
@@ -269,7 +273,7 @@ async fn download_attempt(
                     last_sample_at = now;
                     last_sample_bytes = downloaded;
                     if let Some(s) = &sink {
-                        *s.lock().unwrap() = Some(DownloadProgress {
+                        s.lock().unwrap().insert(tag.to_string(), DownloadProgress {
                             tag: tag.into(), asset_name: asset_name.into(),
                             downloaded, total, speed_bps, started_at,
                         });
