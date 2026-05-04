@@ -1492,26 +1492,6 @@ fn render_status_cell(
                                 slot.lock().unwrap().push((tag2, result));
                             });
                         }
-                        if r.cached
-                            && ui.button("?").on_hover_text("Diagnose downloaded installer").clicked()
-                        {
-                            let asset_name = name.clone();
-                            let console = state.console.clone();
-                            let cache = crate::paths::downloads_dir().join(&asset_name);
-                            crate::console::info(&console, "diagnose",
-                                format!("running diagnostic on {}", cache.display()));
-                            std::thread::spawn(move || {
-                                match versions::diagnose::diagnose_installer(&cache) {
-                                    Ok(report) => {
-                                        for line in report.lines() {
-                                            crate::console::info(&console, "diagnose", line.to_string());
-                                        }
-                                    }
-                                    Err(e) => crate::console::error(&console, "diagnose",
-                                        format!("{e:#}")),
-                                }
-                            });
-                        }
                     }
                 }
             });
