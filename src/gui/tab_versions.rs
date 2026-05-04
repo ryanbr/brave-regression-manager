@@ -117,10 +117,23 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // and triggers the auto-refetch path below.
         let mut preset_clicked: Option<&str> = None;
         ui.menu_button("Preset v", |ui| {
-            for (label, days) in [
-                ("7d", 7i64), ("14d", 14), ("30d", 30), ("60d", 60),
+            // Base presets — always available (anonymous 60 req/hr is
+            // enough for these). The 200d / 250d / 300d entries below
+            // walk deep enough that a fresh fetch can outright trip
+            // the anonymous rate limit, so they only appear when a
+            // GitHub token is configured.
+            let base: &[(&str, i64)] = &[
+                ("7d", 7), ("14d", 14), ("30d", 30), ("60d", 60),
                 ("90d", 90), ("120d", 120), ("150d", 150),
-            ] {
+            ];
+            let token_only: &[(&str, i64)] = &[
+                ("200d", 200), ("250d", 250), ("300d", 300),
+            ];
+            let has_token = !state.github_token.trim().is_empty();
+            let preset_iter = base.iter().chain(
+                if has_token { token_only.iter() } else { [].iter() }
+            );
+            for &(label, days) in preset_iter {
                 if ui.button(label).clicked() {
                     state.date_to   = Some(today);
                     state.date_from = Some(clamp_date(today - chrono::Duration::days(days)));
@@ -128,6 +141,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     preset_clicked = Some(label);
                     ui.close_menu();
                 }
+            }
+            if !has_token {
+                ui.separator();
+                super::app::weak_label(ui,
+                    "200d / 250d / 300d unlock when a GitHub token is set in Settings");
             }
         });
         // Echo any date-filter change to the Console — preset name when
