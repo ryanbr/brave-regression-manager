@@ -783,7 +783,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 let mut new_verdict = current_verdict;
                 egui::ComboBox::from_id_source(format!("verdict-{}", v.tag))
                     .width(82.0)
-                    .selected_text(verdict_label(current_verdict))
+                    .selected_text(RichText::new(verdict_label(current_verdict))
+                        .color(verdict_color(current_verdict)).strong())
                     .show_ui(ui, |ui| {
                         for v in [
                             Verdict::Good,
@@ -795,7 +796,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         ] {
                             // Color each option's label so the dropdown
                             // mirrors the row's dot-colour palette.
-                            let txt = RichText::new(verdict_label(v)).color(verdict_color(v));
+                            let txt = RichText::new(verdict_label(v))
+                                .color(verdict_color(v)).strong();
                             ui.selectable_value(&mut new_verdict, v, txt);
                         }
                     });
