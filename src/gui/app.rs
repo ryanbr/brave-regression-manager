@@ -244,7 +244,7 @@ impl App {
             // so the live `detect_release_channel` can fill them in from the
             // full asset list. Skips when everything's already labelled.
             let needs_refetch = rows.iter().any(|r| r.channel == "?" || r.channel.is_empty());
-            state.available = rows;
+            state.available = std::sync::Arc::new(rows);
             state.available_fetched_at = Some(cache.fetched_at);
             if needs_refetch { tab_versions::spawn_fetch(&mut state); }
         }
@@ -316,7 +316,7 @@ impl App {
         // list as each page lands so the UI shows progress instead of a
         // blank "fetching…" wait.
         if let Some(partial) = self.state.slots.partial_releases.lock().unwrap().take() {
-            self.state.available = partial;
+            self.state.available = std::sync::Arc::new(partial);
             // Persisting between every page would thrash the cache file;
             // wait for the final result before saving.
         }
@@ -357,7 +357,7 @@ impl App {
                         console::warn(&self.state.console, "cache",
                             format!("could not persist releases cache: {e}"));
                     }
-                    self.state.available = rows;
+                    self.state.available = std::sync::Arc::new(rows);
                     self.state.available_fetched_at = Some(chrono::Utc::now());
                 }
                 Err(e) => {
@@ -385,7 +385,9 @@ impl App {
                     console::info(&self.state.console, "install", &msg);
                     self.state.status_msg = msg;
                     self.state.installed = crate::versions::list_installed().unwrap_or_default();
-                    for r in &mut self.state.available { r.refresh_cached(); }
+                    for r in std::sync::Arc::make_mut(&mut self.state.available).iter_mut() {
+                        r.refresh_cached();
+                    }
                 }
                 Err(e) => {
                     // Append an actionable hint when the OS error or
@@ -442,9 +444,10 @@ impl App {
             match res {
                 Ok(row) => {
                     let tag = row.tag.clone();
-                    self.state.available.retain(|r| r.tag != tag);
-                    self.state.available.push(row);
-                    self.state.available.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+                    let av = std::sync::Arc::make_mut(&mut self.state.available);
+                    av.retain(|r| r.tag != tag);
+                    av.push(row);
+                    av.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                     // Mark this tag as user-added so the per-row channel
                     // filter exempts it — adding a Release tag while the
                     // GUI shows Nightly only should still display it.

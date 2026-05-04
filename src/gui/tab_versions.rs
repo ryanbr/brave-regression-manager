@@ -924,7 +924,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             // Refresh `cached` flags on the in-memory rows
                             // so the [cached] pill / "Install (cached)"
                             // label disappear next frame.
-                            for r in &mut state.available { r.refresh_cached(); }
+                            for r in std::sync::Arc::make_mut(&mut state.available).iter_mut() {
+                                r.refresh_cached();
+                            }
                             let mb = bytes as f64 / 1_048_576.0;
                             crate::console::info(&state.console, "cache",
                                 format!("removed {n} file(s), freed {mb:.1} MiB"));
@@ -1022,7 +1024,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 _ => true, // unknown channel — don't hide
             }
         };
-        for r in &rows {
+        for r in rows.iter() {
             if let Some(o) = oldest {
                 if r.published_at.as_str() < o { oldest = Some(&r.published_at); }
             } else {
@@ -1136,17 +1138,22 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // promote manually-added tags to the top so they're easy to
         // find regardless of the user's current sort key, with a
         // separator drawn between the manual block and the rest.
-        let mut rows = rows;
-        sort_available_rows(&mut rows, state.avail_sort_by, state.avail_sort_asc,
-            &verdicts_by_tag, &notes_by_tag);
-        rows.sort_by_key(|r| !state.manual_release_tags.contains(&r.tag));
+        // Index-based sort so we don't have to deep-clone the row Vec
+        // out of the Arc snapshot. Sorting 4000 usizes is essentially
+        // free vs cloning 4000 ReleaseRow structs (each with several
+        // Strings inside).
+        let mut order: Vec<usize> = (0..rows.len()).collect();
+        sort_available_indices(&mut order, &rows, state.avail_sort_by,
+            state.avail_sort_asc, &verdicts_by_tag, &notes_by_tag);
+        order.sort_by_key(|&i| !state.manual_release_tags.contains(&rows[i].tag));
 
         // Manually-added tags also bypass the date filter — if the user
         // explicitly asked for v1.46.66 they shouldn't have to widen
         // their date range to see it. Channel filter is already bypassed
         // by `pass_channel`'s manual-tag check.
         let mut last_was_manual = false;
-        for r in &rows {
+        for &row_idx in &order {
+            let r = &rows[row_idx];
             let is_manual = state.manual_release_tags.contains(&r.tag);
             if state.hide_no_installer && r.host_asset.is_none() { continue; }
             if !is_manual && !date_in_range(&r.published_at, state.date_from, state.date_to) { continue; }
@@ -1283,14 +1290,15 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                 }
                             }
                             state.manual_release_tags.remove(&tag);
-                            state.available.retain(|x| x.tag != tag);
+                            std::sync::Arc::make_mut(&mut state.available)
+                                .retain(|x| x.tag != tag);
                             if let Err(e) = verdict::unmark_manual_release(&tag) {
                                 crate::console::error(&state.console, "manual",
                                     format!("  • sqlite cleanup failed: {e:#}"));
                                 state.status_msg = format!("remove failed: {e}");
                             } else {
                                 crate::console::info(&state.console, "manual",
-                                    format!("  • dropped from manual_release_tags + release_cache"));
+                                    "  • dropped from manual_release_tags + release_cache");
                                 crate::console::info(&state.console, "manual",
                                     format!("removed manual tag {tag}{uninstall_note}"));
                                 state.status_msg = format!("removed {tag}{uninstall_note}");
@@ -1538,16 +1546,28 @@ fn render_compare_section(
     // Load / Open on GitHub / Chromium buttons inside each bracket panel
     // read at the same scale. Scoped via allocate_ui so the styling
     // doesn't bleed into siblings rendered after this section.
+    // Build a tag -> (chromium_version, published_at) index ONCE
+    // before iterating channels. Without this each render_compare_one
+    // call did O(n) iter().find() lookups for both endpoints —
+    // N≈4000 × 2 × 3 channels = ~24k linear scans per frame the panel
+    // is visible. Owned strings (not &str) so the map doesn't borrow
+    // from state, freeing state for the &mut pass into the closure.
+    let row_by_tag: std::collections::HashMap<String, (Option<String>, String)> =
+        state.available.iter()
+            .map(|r| (r.tag.clone(),
+                     (r.chromium_version.clone(), r.published_at.clone())))
+            .collect();
     ui.allocate_ui(ui.available_size(), |ui| {
         for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
             font_id.size += 3.0;
         }
         for (channel, older, newer, good, bad) in &brackets {
-            render_compare_one(ui, state, channel, older, newer, good, bad);
+            render_compare_one(ui, state, channel, older, newer, good, bad, &row_by_tag);
         }
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_compare_one(
     ui: &mut Ui,
     state: &mut AppState,
@@ -1556,6 +1576,7 @@ fn render_compare_one(
     newer: &str,
     good: &str,
     bad: &str,
+    row_by_tag: &std::collections::HashMap<String, (Option<String>, String)>,
 ) {
     let loading = state.compare_loading.contains(channel);
     let has_result = state.compare_results.contains_key(channel);
@@ -1565,13 +1586,13 @@ fn render_compare_one(
     // the sqlite tag_metadata cache when a bracket tag isn't in the
     // currently-loaded available window (e.g. an older installed tag).
     let lookup_chr = |tag: &str| -> Option<String> {
-        state.available.iter().find(|r| r.tag == tag)
-            .and_then(|r| r.chromium_version.clone())
+        row_by_tag.get(tag)
+            .and_then(|(chr, _)| chr.clone())
             .or_else(|| verdict::tag_metadata(tag).0)
     };
     let lookup_date = |tag: &str| -> Option<String> {
-        state.available.iter().find(|r| r.tag == tag)
-            .map(|r| r.published_at.get(..10).unwrap_or(&r.published_at).to_string())
+        row_by_tag.get(tag)
+            .map(|(_, pa)| pa.get(..10).unwrap_or(pa).to_string())
             .or_else(|| verdict::tag_metadata(tag).1
                 .map(|s| s.get(..10).unwrap_or(&s).to_string()))
     };
@@ -2199,8 +2220,13 @@ fn open_url(url: &str) {
 /// channel/note are plain string compares; verdict uses a fixed rank
 /// so [BAD] / [BUGGY] / [UNSURE] / [GOOD] / [NEW] / (none) cluster
 /// predictably rather than by enum-discriminant order.
-fn sort_available_rows(
-    rows: &mut [super::state::ReleaseRow],
+/// Sort an `order` index slice in place using the underlying `rows`
+/// for comparisons — lets the caller hold the row data behind an
+/// `Arc<Vec<…>>` without paying a deep clone every frame just to get
+/// a sortable slice.
+fn sort_available_indices(
+    order: &mut [usize],
+    rows: &[super::state::ReleaseRow],
     by: super::state::AvailSortColumn,
     asc: bool,
     verdicts_by_tag: &std::collections::HashMap<String, crate::verdict::Verdict>,
@@ -2218,7 +2244,9 @@ fn sort_available_rows(
             Verdict::Unknown  => 5,
         }
     };
-    rows.sort_by(|a, b| {
+    order.sort_by(|&ia, &ib| {
+        let a = &rows[ia];
+        let b = &rows[ib];
         let ord = match by {
             C::Tag => {
                 let pa = semver::Version::parse(a.tag.trim_start_matches('v')).ok();
@@ -2335,8 +2363,7 @@ pub(crate) fn throwaway_profile_dir(tag: &str) -> std::path::PathBuf {
 }
 
 /// Read `<user-data-dir>/Local State` and emit two pieces of context
-/// to the Console: a sub-profile inventory (which sub-folders exist
-/// + which one Local State marks as last-used) and a version-mismatch
+/// to the Console: a sub-profile inventory plus a version-mismatch
 /// warning if the launching Brave version is older than whatever last
 /// wrote the profile (older Brave can't safely open newer schemas).
 fn describe_local_state(

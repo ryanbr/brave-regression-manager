@@ -156,7 +156,13 @@ pub struct AppState {
 
     // Tab 1: versions
     pub installed: Vec<InstalledVersion>,
-    pub available: Vec<ReleaseRow>,
+    /// `Arc<Vec<ReleaseRow>>` rather than a bare `Vec` so the Available
+    /// render loop can grab a cheap O(1) refcount-bump snapshot each
+    /// frame instead of paying ~20–40k heap allocations to deep-clone
+    /// every row. Mutations (push / retain / refresh_cached) go through
+    /// `Arc::make_mut` which COW-clones the inner Vec exactly once,
+    /// only when needed.
+    pub available: std::sync::Arc<Vec<ReleaseRow>>,
     /// In-memory edit buffer for per-version launch args, keyed by tag.
     /// Loaded lazily on first render of each row. Persisted to sqlite on
     /// blur via `verdict::set_launch_args`.
@@ -270,7 +276,7 @@ impl AppState {
             console,
             tab: Tab::Versions,
             installed: vec![],
-            available: vec![],
+            available: std::sync::Arc::new(vec![]),
             launch_args_buf: HashMap::new(),
             available_fetched_at: None,
             hide_no_installer: true,
