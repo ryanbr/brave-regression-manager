@@ -228,6 +228,10 @@ pub struct AppState {
     /// Exempted from the channel display filter so a manually-added
     /// Release/Beta tag still shows when only Nightly is ticked.
     pub manual_release_tags: HashSet<String>,
+    /// Height in pixels of the Installed-versions panel — adjusted by
+    /// dragging the divider beneath it. Session-only (resets on app
+    /// restart). `None` falls back to the default 7-row height.
+    pub installed_panel_height: Option<f32>,
 
     /// Per-tag freeform-note editor. `Some(tag)` while the popup is open;
     /// the buffer holds the in-progress edit so it survives repaints.
@@ -296,6 +300,7 @@ impl AppState {
             add_by_tag_buf: String::new(),
             adding_by_tag: false,
             manual_release_tags: HashSet::new(),
+            installed_panel_height: None,
             editing_note_tag: None,
             editing_note_buf: String::new(),
             status_msg: String::new(),

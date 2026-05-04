@@ -389,10 +389,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
-    // Installed list stays compact (7 rows). Available list fills the
-    // remainder of the window so we don't get a big blank area below it.
+    // Installed list defaults to ~7 rows tall; the user can drag the
+    // divider below it to resize. Session state — see
+    // `state.installed_panel_height`. Available list fills whatever
+    // remains so we don't get a big blank area below it.
     let row_h = ui.spacing().interact_size.y + 2.0;
-    let installed_h = row_h * 7.0;
+    let installed_h = state.installed_panel_height.unwrap_or(row_h * 7.0);
 
     let heading_size = egui::TextStyle::Body.resolve(ui.style()).size + 2.0;
     ui.label(RichText::new("Installed versions").strong().size(heading_size));
@@ -678,7 +680,32 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     });
 
     // ── Commits between bracketed tags (brave-core) ─────────────────────
-    ui.separator();
+    // Draggable horizontal divider — drag up/down to resize the
+    // Installed-versions panel vs the Commits-in-bracket panel below.
+    // 6px tall hit zone with a centered hairline so it reads as a
+    // resize handle, not just empty space.
+    let handle_resp = ui.allocate_response(
+        egui::vec2(ui.available_width(), 6.0),
+        egui::Sense::drag()
+    );
+    let stroke = if handle_resp.hovered() || handle_resp.dragged() {
+        ui.visuals().widgets.active.bg_stroke
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke
+    };
+    let mid_y = handle_resp.rect.center().y;
+    ui.painter().line_segment(
+        [egui::pos2(handle_resp.rect.left(),  mid_y),
+         egui::pos2(handle_resp.rect.right(), mid_y)],
+        stroke);
+    if handle_resp.hovered() || handle_resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    if handle_resp.dragged() {
+        let cur = state.installed_panel_height.unwrap_or(installed_h);
+        let new_h = (cur + handle_resp.drag_delta().y).clamp(row_h * 2.0, row_h * 25.0);
+        state.installed_panel_height = Some(new_h);
+    }
     render_compare_section(ui, state, brackets.clone());
 
     ui.separator();
