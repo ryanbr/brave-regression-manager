@@ -874,7 +874,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             // input: strip any leading `v`/`V` they may have typed, then
             // prefix exactly one lowercase `v`. Handles `v1.91.119`,
             // `V1.91.119`, and bare `1.91.119` identically.
-            let bare = raw.trim_start_matches(|c: char| c == 'v' || c == 'V');
+            let bare = raw.trim_start_matches(['v', 'V']);
             let tag = format!("v{bare}");
             spawn_add_by_tag(state, tag);
         }
@@ -2242,12 +2242,10 @@ fn remove_cached_downloads() -> std::io::Result<(usize, u64)> {
         let md = entry.metadata()?;
         if md.is_dir() {
             // Walk the subtree to tally bytes before removing.
-            for sub in walkdir::WalkDir::new(&p) {
-                if let Ok(s) = sub {
-                    if s.file_type().is_file() {
-                        bytes += s.metadata().map(|m| m.len()).unwrap_or(0);
-                        count += 1;
-                    }
+            for s in walkdir::WalkDir::new(&p).into_iter().flatten() {
+                if s.file_type().is_file() {
+                    bytes += s.metadata().map(|m| m.len()).unwrap_or(0);
+                    count += 1;
                 }
             }
             std::fs::remove_dir_all(&p)?;

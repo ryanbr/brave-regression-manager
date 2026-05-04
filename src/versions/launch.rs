@@ -47,6 +47,7 @@ pub fn launch(tag: &str, profile: &str) -> Result<Child> {
 /// pinned, `false` lets Brave fetch fresh lists from the update server.
 /// `extra_args` are appended verbatim to the launch command line — used
 /// for per-version custom flags configured in the GUI.
+#[allow(clippy::too_many_arguments)]
 pub fn launch_with_console(tag: &str, profile: &str,
                            console: crate::console::Handle,
                            log_level: BraveLogLevel,
