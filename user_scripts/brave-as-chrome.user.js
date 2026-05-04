@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Brave-as-Chrome (anti-fingerprint)
 // @namespace    https://github.com/ryanbr/twitch-brave-fix
-// @version      1.3.0
+// @version      1.4.0
 // @description  Generalized derivative of TwitchAdSolutions' twitch-brave-fix that runs on every site. Hides navigator.brave (the canonical Brave detector — exposed even in Strict shields), rebrands navigator.userAgentData.brands / getHighEntropyValues so "Brave" becomes "Google Chrome", patches navigator.onLine to track real online/offline events instead of Brave's hardwired `false` (brave/brave-browser#38240), fabricates a plausible navigator.connection (NetworkInformation) object so sites checking `if (navigator.connection)` no longer see Brave's `undefined` (brave/brave-browser#44985), removes navigator.globalPrivacyControl (Brave-only, not in Chrome), and forces navigator.doNotTrack to null (Chrome's modern default) so DNT-checking sites don't flag the session. Network-level header spoofs (Sec-Ch-Ua) are NOT applied here — those would require per-site GM_xmlHttpRequest retry logic and are tightly coupled to each site's failure signature; use the original Twitch-specific script for that case. This script is JS-surface only and safe to run globally.
 // @author       https://github.com/ryanbr
 // @match        *://*/*
@@ -40,36 +40,51 @@
 
     // navigator.userAgentData.brands carries an explicit "Brave" entry on Brave. Sites that
     // call getHighEntropyValues(['brands']) bypass any outgoing-header spoof entirely and read
-    // the JS-side surface directly. Rebrand both the synchronous .brands accessor and the
-    // async getHighEntropyValues({brands, fullVersionList}) result. Runs synchronously at
-    // document-start before site bundles can snapshot the original.
+    // the JS-side surface directly. Brave seals the NavigatorUAData instance so direct
+    // `Object.defineProperty(uaData, 'brands', ...)` and `uaData.getHighEntropyValues = ...`
+    // both throw silently in strict mode (v1.0-1.3 issue: spoof was no-op on real Brave). Fix:
+    // replace the navigator.userAgentData accessor on the navigator instance with a wrapper
+    // object that delegates to the real one but rebrands brand-bearing fields. The wrapper
+    // is a plain object with getter shadows for the synchronous accessors and a wrapped
+    // getHighEntropyValues that rebrands result.brands / result.fullVersionList.
     try {
-        const uaData = navigator.userAgentData;
-        if (uaData) {
+        const realUaData = navigator.userAgentData;
+        if (realUaData) {
             const rebrand = (arr) => Array.isArray(arr)
                 ? arr.map(b => b.brand === 'Brave'
                     ? { brand: 'Google Chrome', version: b.version }
                     : b)
                 : arr;
-            const spoofedBrands = Object.freeze(rebrand(uaData.brands));
-            Object.defineProperty(uaData, 'brands', {
-                get: () => spoofedBrands,
-                configurable: true,
-            });
-            const origGHEV = uaData.getHighEntropyValues;
-            if (typeof origGHEV === 'function') {
-                uaData.getHighEntropyValues = function(hints) {
-                    return origGHEV.call(this, hints).then(result => {
+            const spoofedBrands = Object.freeze(rebrand(realUaData.brands).map(b => Object.freeze({ ...b })));
+            const fakeUaData = {
+                get brands() { return spoofedBrands; },
+                get mobile() { return realUaData.mobile; },
+                get platform() { return realUaData.platform; },
+                getHighEntropyValues(hints) {
+                    return realUaData.getHighEntropyValues(hints).then(result => {
                         if (result && Array.isArray(result.brands))
                             result.brands = rebrand(result.brands);
                         if (result && Array.isArray(result.fullVersionList))
                             result.fullVersionList = rebrand(result.fullVersionList);
                         return result;
                     });
-                };
-            }
+                },
+                toJSON() {
+                    // toJSON returns the low-entropy fields as a plain object — re-emit with
+                    // the spoofed brands. Used by JSON.stringify(navigator.userAgentData).
+                    return {
+                        brands: spoofedBrands,
+                        mobile: realUaData.mobile,
+                        platform: realUaData.platform,
+                    };
+                },
+            };
+            Object.defineProperty(navigator, 'userAgentData', {
+                get: () => fakeUaData,
+                configurable: true,
+            });
         }
-    } catch (_e) { /* read-only on some builds — JS-surface unmaskable */ }
+    } catch (_e) { /* defineProperty rejected on this build — JS-surface unmaskable */ }
 
     // navigator.onLine is hardwired to `false` in Brave regardless of actual network state
     // (brave/brave-browser#38240). Two harms: (1) it's a Brave fingerprint (always-false
