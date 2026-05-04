@@ -1028,6 +1028,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // walking pagination back to it. One API call to releases/tags/<tag>;
     // the row is upserted into state.available + the persistent cache.
     ui.horizontal(|ui| {
+        // Bump every text style by +1 px in this row only — pulls the
+        // Add-by-tag label / TextEdit / [Add] button out a touch from
+        // the surrounding small-button noise so it's easier to find.
+        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+            font_id.size += 1.0;
+        }
         super::app::weak_label(ui, "Add release by tag:");
         ui.add(egui::TextEdit::singleline(&mut state.add_by_tag_buf)
             .desired_width(140.0)
