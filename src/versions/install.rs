@@ -42,6 +42,27 @@ impl DownloadProgress {
 /// slot, which made parallel downloads stomp each other every iteration.
 pub type ProgressSink = Arc<Mutex<std::collections::HashMap<String, DownloadProgress>>>;
 
+/// RAII guard that removes a tag's entry from a `ProgressSink` on
+/// drop. Owning one of these inside an install future guarantees the
+/// progress map is cleaned up no matter how the future exits — early
+/// `?` from a download/extract failure, panic, or future-cancellation
+/// from the GUI all run Drop. Without this the previous code only
+/// cleaned up on the success path; failed installs left stale entries
+/// in the HashMap that would accumulate over time.
+struct ProgressGuard {
+    sink: Option<ProgressSink>,
+    tag:  String,
+}
+impl Drop for ProgressGuard {
+    fn drop(&mut self) {
+        if let Some(s) = &self.sink {
+            if let Ok(mut g) = s.lock() {
+                g.remove(&self.tag);
+            }
+        }
+    }
+}
+
 /// Download (with resume + sha) and extract a Nightly tag into its own folder.
 pub async fn install_tag(tag: &str) -> Result<PathBuf> {
     install_tag_with_progress(tag, None).await
@@ -91,8 +112,15 @@ pub async fn install_tag_with_asset_console(
                 format!("{tag}: phase=download {asset_name}"));
         }
     }
+    // Cleans the tag's entry out of the progress sink on every exit
+    // path (Ok, Err, panic, future-cancellation). Stays in scope for
+    // the rest of the function so the in-flight download/extract
+    // continues to write to its own slot.
+    let _progress_guard = ProgressGuard {
+        sink: sink.clone(),
+        tag:  tag.to_string(),
+    };
     download(asset_url, &download_path, asset_size, tag, asset_name, sink.clone()).await?;
-    if let Some(s) = &sink { s.lock().unwrap().remove(tag); }
 
     let dest = paths::version_dir(tag);
     if dest.exists() { std::fs::remove_dir_all(&dest)?; }
