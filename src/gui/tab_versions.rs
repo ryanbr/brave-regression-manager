@@ -503,6 +503,41 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         format!("github_token: {s}"));
                 }
                 ui.end_row();
+
+                // Discoverable mirror of the Available header's
+                // Clear -> Remove Cached files action — same behaviour
+                // (wipes everything under <data-root>/cache/downloads/),
+                // exposed here so the user doesn't have to scroll down
+                // to find it.
+                ui.label("Cached files:").on_hover_text(
+                    "Delete every downloaded installer asset under \
+                     cache/downloads/. Already-installed Brave versions \
+                     are NOT touched — only the on-disk archives that \
+                     drive the [cached] / Install (cached) shortcut.");
+                if ui.button("Delete cached files").clicked() {
+                    match remove_cached_downloads() {
+                        Ok((n, bytes)) => {
+                            // Refresh `cached` flags on every Available
+                            // row so the [cached] pill / Install (cached)
+                            // labels disappear next frame.
+                            let dl_idx = super::state::read_downloads_index();
+                            for r in std::sync::Arc::make_mut(&mut state.available).iter_mut() {
+                                r.refresh_cached_with(&dl_idx);
+                            }
+                            let mb = bytes as f64 / 1_048_576.0;
+                            crate::console::info(&state.console, "cache",
+                                format!("removed {n} file(s), freed {mb:.1} MiB"));
+                            state.status_msg = format!(
+                                "removed {n} cached file(s) ({mb:.1} MiB)");
+                        }
+                        Err(e) => {
+                            crate::console::error(&state.console, "cache",
+                                format!("remove cached files failed: {e:#}"));
+                            state.status_msg = format!("remove failed: {e}");
+                        }
+                    }
+                }
+                ui.end_row();
             });
             super::app::weak_label(ui, format!("Date range minimum: {} (Brave Nightly history starts here)",
                             min_allowed_date()));
