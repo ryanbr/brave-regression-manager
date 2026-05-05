@@ -234,7 +234,21 @@ impl App {
         // state.available on the next frame.
         state.loading_startup_cache = true;
         let slot = state.slots.startup_cache_done.clone();
+        let console_for_purge = state.console.clone();
         state.rt.spawn(async move {
+            // Best-effort purge of throwaway-* profile dirs older than
+            // 24 h before the cache load. They're single-use, never
+            // picked manually, and accumulate fast when Clean profile
+            // per launch is enabled. Logs a one-line summary when at
+            // least one was removed.
+            let (purged, freed) = crate::profile::purge_stale_throwaways(
+                std::time::Duration::from_secs(24 * 60 * 60));
+            if purged > 0 {
+                let mb = freed as f64 / 1_048_576.0;
+                crate::console::info(&console_for_purge, "profile",
+                    format!("purged {purged} stale throwaway profile(s), \
+                             freed {mb:.1} MiB"));
+            }
             let mut payload: (Vec<super::state::ReleaseRow>,
                               Option<chrono::DateTime<chrono::Utc>>)
                 = (Vec::new(), None);

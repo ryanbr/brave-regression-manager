@@ -169,8 +169,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.seeding = true;
                 state.status_msg = "seeding…".into();
                 let slot = state.slots.seed_done.clone();
+                let cons = state.console.clone();
                 state.rt.spawn(async move {
-                    let result = profile::seed::seed_lists(&prof, &tag).await
+                    let result = profile::seed::seed_lists_with_console(
+                        &prof, &tag, Some(cons)).await
                         .map_err(|e| e.to_string());
                     *slot.lock().unwrap() = Some(result);
                 });
