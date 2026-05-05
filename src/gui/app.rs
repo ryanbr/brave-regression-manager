@@ -166,7 +166,10 @@ impl App {
         state.default_args_enabled        = cfg.gui.default_args_enabled;
         state.default_args                = cfg.gui.default_args.clone();
         state.clean_profile_per_launch    = cfg.gui.clean_profile_per_launch;
-        state.incremental_release_cache   = cfg.gui.incremental_release_cache;
+        // incremental_release_cache used to be a Settings toggle —
+        // now always-on; the field stays in config.toml for backward
+        // compat with already-written configs but is ignored.
+        let _ = cfg.gui.incremental_release_cache;
         state.launch_as_admin             = cfg.gui.launch_as_admin;
         state.versions_dir                = cfg.gui.versions_dir.clone();
         // Wire the override into paths::versions_dir() *before* any
@@ -217,12 +220,12 @@ impl App {
             "theme={}  channels={}  release_count={}  date={}  \
              log_level={:?}  freeze_components={}  \
              versions_dir={}  default_profile_folder={}  default_args={}  \
-             clean_profile_per_launch={}  incremental_release_cache={}  \
+             clean_profile_per_launch={}  \
              launch_as_admin={}  github_token={}",
             state.theme, chans, state.release_count, date_filter,
             state.brave_log_level, state.freeze_components,
             versions_dir_str, prof_dir, def_args,
-            state.clean_profile_per_launch, state.incremental_release_cache,
+            state.clean_profile_per_launch,
             state.launch_as_admin, token_str));
         // Defer the heavy startup work — releases.json read + JSON
         // parse + (incremental) sqlite merge — to a background tokio
@@ -230,37 +233,31 @@ impl App {
         // drain_async_results below picks up the result and populates
         // state.available on the next frame.
         state.loading_startup_cache = true;
-        let slot       = state.slots.startup_cache_done.clone();
-        let incremental = state.incremental_release_cache;
+        let slot = state.slots.startup_cache_done.clone();
         state.rt.spawn(async move {
-            // tokio::task::spawn_blocking would be more correct for
-            // pure-CPU/disk work, but spawn here keeps the dependency
-            // surface tiny and the load is short.
             let mut payload: (Vec<super::state::ReleaseRow>,
                               Option<chrono::DateTime<chrono::Utc>>)
                 = (Vec::new(), None);
             if let Some(cache) = ReleaseCache::load() {
-                // Single read_dir of the downloads cache — every row
-                // below consults this map instead of stat'ing on its
-                // own. With multi-thousand-row caches the syscall
-                // savings are substantial.
                 let dl_idx = super::state::read_downloads_index();
                 let mut rows = cache.rows;
                 for r in &mut rows { r.refresh_cached_with(&dl_idx); r.ensure_channel(); }
-                if incremental {
-                    use std::collections::HashMap;
-                    let mut by_tag: HashMap<String, super::state::ReleaseRow> =
-                        rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
-                    for json in crate::verdict::all_release_cache_rows() {
-                        if let Ok(mut r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
-                            r.refresh_cached_with(&dl_idx);
-                            r.ensure_channel();
-                            by_tag.entry(r.tag.clone()).or_insert(r);
-                        }
+                // Always-on incremental cache — union with everything
+                // sqlite has ever seen so the GUI starts up with the
+                // full known history (releases.json holds the last
+                // fetch's window only).
+                use std::collections::HashMap;
+                let mut by_tag: HashMap<String, super::state::ReleaseRow> =
+                    rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
+                for json in crate::verdict::all_release_cache_rows() {
+                    if let Ok(mut r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
+                        r.refresh_cached_with(&dl_idx);
+                        r.ensure_channel();
+                        by_tag.entry(r.tag.clone()).or_insert(r);
                     }
-                    rows = by_tag.into_values().collect();
-                    rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                 }
+                rows = by_tag.into_values().collect();
+                rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                 payload = (rows, Some(cache.fetched_at));
             }
             *slot.lock().unwrap() = Some(Ok(payload));
@@ -289,7 +286,10 @@ impl App {
         cfg.gui.default_args_enabled        = self.state.default_args_enabled;
         cfg.gui.default_args                = self.state.default_args.clone();
         cfg.gui.clean_profile_per_launch    = self.state.clean_profile_per_launch;
-        cfg.gui.incremental_release_cache   = self.state.incremental_release_cache;
+        // incremental_release_cache is always-on now; keep writing
+        // `true` so older builds reading the same config still see
+        // the expected default.
+        cfg.gui.incremental_release_cache   = true;
         cfg.gui.launch_as_admin             = self.state.launch_as_admin;
         cfg.gui.versions_dir                = self.state.versions_dir.clone();
         if let Err(e) = cfg.save(&paths::config_path()) {
@@ -358,27 +358,22 @@ impl App {
             self.state.fetching_releases = false;
             match res {
                 Ok(mut rows) => {
-                    // Incremental mode: the fetch only returned NEW rows
-                    // (it broke pagination as soon as it hit a known
-                    // tag). Merge with everything already in the sqlite
-                    // release_cache so state.available reflects the full
-                    // history, not just the delta. Without this, a
-                    // post-incremental render would shrink to "today's
-                    // few new tags" instead of showing the full window.
-                    if self.state.incremental_release_cache {
-                        use std::collections::HashMap;
-                        let mut by_tag: HashMap<String, super::state::ReleaseRow> =
-                            rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
-                        for json in crate::verdict::all_release_cache_rows() {
-                            if let Ok(r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
-                                by_tag.entry(r.tag.clone()).or_insert(r);
-                            }
+                    // The fetch only returned NEW rows (it broke
+                    // pagination as soon as it hit a known tag). Merge
+                    // with everything already in the sqlite release_cache
+                    // so state.available reflects the full history, not
+                    // just the delta. Without this, a post-incremental
+                    // render would shrink to "today's few new tags".
+                    use std::collections::HashMap;
+                    let mut by_tag: HashMap<String, super::state::ReleaseRow> =
+                        rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
+                    for json in crate::verdict::all_release_cache_rows() {
+                        if let Ok(r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
+                            by_tag.entry(r.tag.clone()).or_insert(r);
                         }
-                        rows = by_tag.into_values().collect();
-                        // Newest-first by published_at — matches the
-                        // ordering GitHub returns natively.
-                        rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                     }
+                    rows = by_tag.into_values().collect();
+                    rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                     let installable = rows.iter().filter(|r| r.host_asset.is_some()).count();
                     let elapsed = self.state.fetching_started.take()
                         .map(|t| format!(" in {:.1}s", t.elapsed().as_secs_f64()))

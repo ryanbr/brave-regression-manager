@@ -125,9 +125,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             let base: &[(&str, i64)] = &[
                 ("7d", 7), ("14d", 14), ("30d", 30), ("60d", 60),
                 ("90d", 90), ("120d", 120), ("150d", 150),
+                ("200d", 200), ("250d", 250),
             ];
             let token_only: &[(&str, i64)] = &[
-                ("200d", 200), ("250d", 250), ("300d", 300), ("365d", 365),
+                ("300d", 300), ("365d", 365), ("400d", 400),
             ];
             let has_token = !state.github_token.trim().is_empty();
             let preset_iter = base.iter().chain(
@@ -145,7 +146,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             if !has_token {
                 ui.separator();
                 super::app::weak_label(ui,
-                    "200d / 250d / 300d / 365d unlock when a GitHub token is set in Settings");
+                    "300d / 365d / 400d unlock when a GitHub token is set in Settings");
             }
         });
         // Echo any date-filter change to the Console — preset name when
@@ -480,29 +481,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                 "launch as admin: enabled".to_string()
                             } else {
                                 "launch as admin: disabled".to_string()
-                            });
-                    }
-                });
-                ui.end_row();
-
-                ui.label("Incremental release cache:").on_hover_text(
-                    "Persist every release we've ever fetched into sqlite \
-                     and break out of pagination as soon as we re-encounter \
-                     a known tag. After the first deep walk, subsequent \
-                     fetches only paginate the few pages newer than the \
-                     latest cached tag — much friendlier to GitHub's rate \
-                     limit when bisecting against older releases. Off by \
-                     default; safe to enable / disable at any time.");
-                ui.horizontal(|ui| {
-                    let prev = state.incremental_release_cache;
-                    ui.checkbox(&mut state.incremental_release_cache, "Enabled");
-                    if prev != state.incremental_release_cache {
-                        state.config_dirty = true;
-                        crate::console::info(&state.console, "config",
-                            if state.incremental_release_cache {
-                                "incremental release cache: enabled".to_string()
-                            } else {
-                                "incremental release cache: disabled".to_string()
                             });
                     }
                 });
@@ -1869,7 +1847,6 @@ fn spawn_add_by_tag(state: &mut AppState, tag: String) {
         format!("add-by-tag: fetching releases/tags/{tag} (single API call)"));
     let token = state.github_token.clone();
     let slot  = state.slots.add_by_tag_done.clone();
-    let incremental = state.incremental_release_cache;
     state.rt.spawn(async move {
         let tok = if token.is_empty() { None } else { Some(token.as_str()) };
         let result = versions::github::fetch_release_by_tag(&tag, tok).await
@@ -1895,10 +1872,8 @@ fn spawn_add_by_tag(state: &mut AppState, tag: String) {
                     skip_reason, cached: false, channel, chromium_version,
                 };
                 row.refresh_cached();
-                if incremental {
-                    if let Ok(json) = serde_json::to_string(&row) {
-                        let _ = verdict::upsert_release_cache_row(&row.tag, &json);
-                    }
+                if let Ok(json) = serde_json::to_string(&row) {
+                    let _ = verdict::upsert_release_cache_row(&row.tag, &json);
                 }
                 row
             });
@@ -1993,11 +1968,9 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                    else                              { "anonymous (60/hr)" };
     let stop_str = state.date_from.map(|d| format!("stop_at={d}"))
         .unwrap_or_else(|| "no stop_at".to_string());
-    let inc_str = if state.incremental_release_cache { "incremental=on" }
-                  else                                { "incremental=off" };
     crate::console::info(&state.console, "github", format!(
         "fetch start: count<={count}  channels={chans_str}  {stop_str}  \
-         {inc_str}  auth={auth_str}"));
+         auth={auth_str}"));
     // Snapshot the oldest cached release date so the async task can
     // decide whether incremental's known-tag short-circuit is safe to
     // apply (it isn't when the user is asking for something deeper
@@ -2013,26 +1986,18 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
     // fetcher halts once it has reached that date — saves API calls when
     // the user only cares about a recent date window.
     let stop_at       = state.date_from;
-    // Incremental mode: fetch ALL channels (filter applied client-side
-    // only) so the cache always grows uniformly and switching channels
-    // later doesn't require a re-fetch. Off mode keeps the GUI's
-    // current channel filter as the server-side filter.
-    let incremental = state.incremental_release_cache;
-    let filter = if incremental {
-        versions::github::ChannelFilter { release: true, beta: true, nightly: true }
-    } else {
-        versions::github::ChannelFilter {
-            release: state.channel_release,
-            beta:    state.channel_beta,
-            nightly: state.channel_nightly,
-        }
+    // Always fetch ALL channels (filter applied client-side only) so
+    // the persistent release_cache grows uniformly and switching
+    // channel checkboxes later doesn't require a re-fetch.
+    let filter = versions::github::ChannelFilter {
+        release: true, beta: true, nightly: true
     };
     state.rt.spawn(async move {
         let tok = if token.is_empty() { None } else { Some(token.as_str()) };
-        // Helper: convert a Vec<github::Release> → Vec<ReleaseRow> for the GUI.
-        // Also persists each row to sqlite `release_cache` when incremental
-        // mode is on, so future fetches can short-circuit on known tags.
-        fn to_rows(rs: Vec<versions::github::Release>, incremental: bool,
+        // Convert a Vec<github::Release> → Vec<ReleaseRow> for the GUI.
+        // Always persists each row to sqlite `release_cache` so future
+        // fetches can short-circuit on known tags.
+        fn to_rows(rs: Vec<versions::github::Release>,
                    dl_idx: &super::state::DownloadsIndex) -> Vec<ReleaseRow> {
             rs.into_iter().map(|r| {
                 let skip_reason = r.skip_reason();
@@ -2063,53 +2028,43 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     chromium_version,
                 };
                 row.refresh_cached_with(dl_idx);
-                if incremental {
-                    if let Ok(json) = serde_json::to_string(&row) {
-                        let _ = verdict::upsert_release_cache_row(&row.tag, &json);
-                    }
+                if let Ok(json) = serde_json::to_string(&row) {
+                    let _ = verdict::upsert_release_cache_row(&row.tag, &json);
                 }
                 row
             }).collect()
         }
-        // Stream each page of results into the partial slot. The GUI's
-        // drain loop picks them up between frames and re-renders.
-        //
         // Honor the known-tag short-circuit only when the user isn't
         // explicitly asking for a date deeper than the cache. If
         // stop_at is older than the oldest cached release, breaking
         // out on the first known tag would leave the requested deep
         // range un-fetched — pass None instead so the fetcher walks
-        // all the way back to stop_at, then everything new along the
-        // way is upserted into sqlite as usual.
+        // all the way back to stop_at.
         let need_deeper_walk = match (stop_at, oldest_cached) {
             (Some(want), Some(have)) => want < have,
             (Some(_),    None)       => true,
             _                        => false,
         };
-        let use_known = incremental && !need_deeper_walk;
-        let known = if use_known { verdict::known_release_cache_tags() }
-                    else         { Default::default() };
-        // One read_dir of the downloads cache shared by every to_rows
-        // invocation in this fetch — partial-page callbacks AND the
-        // final result. Avoids N stat() calls per page.
+        let known = if need_deeper_walk { Default::default() }
+                    else                { verdict::known_release_cache_tags() };
         let dl_idx = super::state::read_downloads_index();
-        let result = if use_known {
+        let result = if !need_deeper_walk {
             versions::github::list_nightly_releases_streaming_incremental(
                 count, tok, stop_at, filter, &known,
                 |partial| {
-                    let rows = to_rows(partial, incremental, &dl_idx);
+                    let rows = to_rows(partial, &dl_idx);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
-                .map(|rs| to_rows(rs, incremental, &dl_idx))
+                .map(|rs| to_rows(rs, &dl_idx))
                 .map_err(|e| e.to_string())
         } else {
             versions::github::list_nightly_releases_streaming(
                 count, tok, stop_at, filter,
                 |partial| {
-                    let rows = to_rows(partial, incremental, &dl_idx);
+                    let rows = to_rows(partial, &dl_idx);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
-                .map(|rs| to_rows(rs, incremental, &dl_idx))
+                .map(|rs| to_rows(rs, &dl_idx))
                 .map_err(|e| e.to_string())
         };
         *slot.lock().unwrap() = Some(result);
