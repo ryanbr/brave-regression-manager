@@ -11,6 +11,13 @@ use super::state::AppState;
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.heading("Adblock Lists");
 
+    // Settings panel mirror — same widgets as the one in Brave Versions.
+    // Visibility is driven by `state.settings_location` so the user can
+    // pick where they want it (versions / lists / both).
+    if matches!(state.settings_location.as_str(), "lists" | "both") {
+        super::tab_versions::render_settings_panel(ui, state, "lists");
+    }
+
     ui.horizontal(|ui| {
         ui.label("Brave version:");
         let installed = state.installed.clone();
@@ -88,27 +95,47 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     String::new()
                 };
                 let extra_args = crate::verdict::parse_launch_args(&effective_args);
-                let custom = {
+                // Resolve the user-data-dir AND tell the user which
+                // precedence tier won — same diagnostic line as the
+                // Installed Versions Launch button so reuse / clean-
+                // per-launch / default behaviour is visible.
+                let (custom, src) = {
                     let per_row = crate::verdict::user_data_dir(&tag);
                     if !per_row.is_empty() {
-                        Some(std::path::PathBuf::from(per_row))
+                        (Some(std::path::PathBuf::from(per_row)), "per-row override".to_string())
                     } else if state.clean_profile_per_launch {
-                        Some(super::tab_versions::throwaway_profile_dir(&tag))
+                        let s = if state.reuse_clean_profile {
+                            "clean-profile-per-launch (reused)".to_string()
+                        } else {
+                            "clean-profile-per-launch (fresh)".to_string()
+                        };
+                        (Some(super::tab_versions::clean_profile_dir_for(state, &tag)), s)
                     } else if state.default_profile_dir_enabled
                         && !state.default_profile_dir.is_empty()
                     {
-                        Some(std::path::PathBuf::from(&state.default_profile_dir))
+                        (Some(std::path::PathBuf::from(&state.default_profile_dir)),
+                         "Settings default profile folder".to_string())
                     } else {
-                        None
+                        (None, "standard app profile".to_string())
                     }
                 };
+                if let Some(p) = &custom {
+                    crate::console::info(&state.console, "profile", format!(
+                        "source={src}  path={}", p.display()));
+                } else {
+                    crate::console::info(&state.console, "profile",
+                        format!("source={src} (no override; using paths::profile_dir({prof}))"));
+                }
+                let effective_user_data = custom.clone()
+                    .unwrap_or_else(|| paths::profile_dir(&prof));
                 match versions::launch::launch_with_console(&tag, &prof, state.console.clone(), state.brave_log_level, state.freeze_components, extra_args, custom, state.launch_as_admin) {
                     Ok(child) => {
                         crate::console::info(&state.console, "launch",
-                            format!("relaunched {tag} (profile={prof})"));
+                            format!("relaunched {tag} (profile={})",
+                                effective_user_data.display()));
                         state.running.insert(tag.clone(), super::state::RunningBrave {
                             tag, profile: prof.clone(), child,
-                            user_data_dir: paths::profile_dir(&prof),
+                            user_data_dir: effective_user_data,
                             spawned_at: std::time::Instant::now(),
                         });
                         state.status_msg = "relaunched".into();

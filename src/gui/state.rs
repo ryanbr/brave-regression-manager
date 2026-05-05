@@ -244,8 +244,17 @@ pub struct AppState {
     pub default_args_enabled: bool,
     pub default_args:         String,
     pub clean_profile_per_launch: bool,
+    pub reuse_clean_profile: bool,
+    /// Session-only memo: when **reuse_clean_profile** is on, the
+    /// throwaway dir generated for each tag's first launch is kept
+    /// here and reused for every subsequent relaunch of that tag.
+    /// Cleared on app restart so new sessions always start fresh.
+    pub session_throwaway_dirs: HashMap<String, std::path::PathBuf>,
     pub launch_as_admin: bool,
     pub versions_dir: String,
+    /// "versions" / "lists" / "both" — where the Settings panel
+    /// renders. Mirrors `cfg.gui.settings_location`.
+    pub settings_location: String,
     pub fetching_releases: bool,
     /// Wall-clock at fetch spawn — the success/error drain formats a
     /// "in N.Ns" suffix on the completion line so the user can see how
@@ -364,8 +373,11 @@ impl AppState {
             default_args_enabled: false,
             default_args: String::new(),
             clean_profile_per_launch: false,
+            reuse_clean_profile: false,
+            session_throwaway_dirs: HashMap::new(),
             launch_as_admin: false,
             versions_dir: String::new(),
+            settings_location: "versions".into(),
             fetching_releases: false,
             fetching_started: None,
             installing: HashSet::new(),

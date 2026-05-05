@@ -166,12 +166,18 @@ impl App {
         state.default_args_enabled        = cfg.gui.default_args_enabled;
         state.default_args                = cfg.gui.default_args.clone();
         state.clean_profile_per_launch    = cfg.gui.clean_profile_per_launch;
+        state.reuse_clean_profile         = cfg.gui.reuse_clean_profile;
         // incremental_release_cache used to be a Settings toggle —
         // now always-on; the field stays in config.toml for backward
         // compat with already-written configs but is ignored.
         let _ = cfg.gui.incremental_release_cache;
         state.launch_as_admin             = cfg.gui.launch_as_admin;
         state.versions_dir                = cfg.gui.versions_dir.clone();
+        state.settings_location           = cfg.gui.settings_location.clone();
+        // Tolerate hand-edited config typos by snapping to a default.
+        if !matches!(state.settings_location.as_str(), "versions" | "lists" | "both") {
+            state.settings_location = "versions".into();
+        }
         // Wire the override into paths::versions_dir() *before* any
         // disk work happens (cache load reads version_dir() to refresh
         // `cached` flags). Empty value keeps the default.
@@ -220,13 +226,13 @@ impl App {
             "theme={}  channels={}  release_count={}  date={}  \
              log_level={:?}  freeze_components={}  \
              versions_dir={}  default_profile_folder={}  default_args={}  \
-             clean_profile_per_launch={}  \
-             launch_as_admin={}  github_token={}",
+             clean_profile_per_launch={}  reuse_clean_profile={}  \
+             launch_as_admin={}  github_token={}  settings_location={}",
             state.theme, chans, state.release_count, date_filter,
             state.brave_log_level, state.freeze_components,
             versions_dir_str, prof_dir, def_args,
-            state.clean_profile_per_launch,
-            state.launch_as_admin, token_str));
+            state.clean_profile_per_launch, state.reuse_clean_profile,
+            state.launch_as_admin, token_str, state.settings_location));
         // Defer the heavy startup work — releases.json read + JSON
         // parse + (incremental) sqlite merge — to a background tokio
         // task so the window paints immediately. Drain block in
@@ -300,12 +306,14 @@ impl App {
         cfg.gui.default_args_enabled        = self.state.default_args_enabled;
         cfg.gui.default_args                = self.state.default_args.clone();
         cfg.gui.clean_profile_per_launch    = self.state.clean_profile_per_launch;
+        cfg.gui.reuse_clean_profile         = self.state.reuse_clean_profile;
         // incremental_release_cache is always-on now; keep writing
         // `true` so older builds reading the same config still see
         // the expected default.
         cfg.gui.incremental_release_cache   = true;
         cfg.gui.launch_as_admin             = self.state.launch_as_admin;
         cfg.gui.versions_dir                = self.state.versions_dir.clone();
+        cfg.gui.settings_location           = self.state.settings_location.clone();
         if let Err(e) = cfg.save(&paths::config_path()) {
             self.state.status_msg = format!("settings save failed: {e}");
         }
@@ -315,6 +323,48 @@ impl App {
     /// Poll every tracked child non-blockingly. When Brave exits on its own
     /// (user closed the window, crash, etc.), drop the entry so the GUI
     /// stops showing "Stop" / "running" for it.
+    /// Diagnostic dump of a Brave profile's adblock-related state —
+    /// emitted when a launched Brave exits so the user can see whether
+    /// their custom filter list survived the close.
+    fn probe_profile_persistence(&self, tag: &str, dir: &std::path::Path) {
+        let prefs = dir.join("Default/Preferences");
+        if !prefs.exists() {
+            console::warn(&self.state.console, "profile", format!(
+                "{tag}: Default/Preferences missing under {} — Brave didn't \
+                 fully initialise this profile, or wrote it elsewhere",
+                dir.display()));
+            return;
+        }
+        let body = match std::fs::read_to_string(&prefs) {
+            Ok(s) => s,
+            Err(e) => {
+                console::warn(&self.state.console, "profile",
+                    format!("{tag}: couldn't read Default/Preferences: {e:#}"));
+                return;
+            }
+        };
+        let size = body.len();
+        // Look for tell-tale strings that indicate the user touched
+        // brave://settings/shields/filters during the session. Brave
+        // stores custom-filter URLs in `brave.shields.fp_*` /
+        // `brave.shields.regional_filters` / `brave.ad_block_*`
+        // depending on version — match loosely.
+        let has_custom_filters = body.contains("custom_filters")
+            || body.contains("regional_filters")
+            || body.contains("custom_subscriptions");
+        let last_modified = std::fs::metadata(&prefs).and_then(|m| m.modified()).ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .map(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_default())
+            .unwrap_or_default();
+        console::info(&self.state.console, "profile", format!(
+            "{tag}: Default/Preferences {} bytes, mtime={}, \
+             custom_filters_keys={}",
+            size, last_modified, has_custom_filters));
+    }
+
     fn reap_running(&mut self) {
         // Capture (tag, exit_status, time-since-spawn) so the Console
         // line can include both the duration the process was alive and
@@ -331,7 +381,7 @@ impl App {
                 })
                 .collect();
         for (tag, status, age) in dead {
-            if self.state.running.remove(&tag).is_some() {
+            if let Some(r) = self.state.running.remove(&tag) {
                 let code = status.and_then(|s| s.code())
                     .map(|c| format!(" (exit code {c})"))
                     .unwrap_or_default();
@@ -339,6 +389,10 @@ impl App {
                     .unwrap_or_default();
                 console::info(&self.state.console, "launch",
                     format!("{tag} exited{dur}{code}"));
+                // Probe the profile dir Brave just closed to confirm
+                // whether prefs (incl. custom adblock filter lists)
+                // actually flushed to disk.
+                self.probe_profile_persistence(&tag, &r.user_data_dir);
             }
         }
     }

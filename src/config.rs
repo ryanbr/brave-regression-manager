@@ -52,6 +52,14 @@ pub struct Gui {
     /// state-corrupted profiles when bisecting regressions. Off by
     /// default; ignored when a per-row user_data_dir is set.
     #[serde(default)] pub clean_profile_per_launch: bool,
+    /// When **clean_profile_per_launch** is on AND this is true, the
+    /// first launch of a given tag in the current session generates
+    /// a throwaway dir and remembers it; subsequent relaunches of
+    /// the same tag re-use that dir so settings/lists/cookies the
+    /// user added in the first launch persist. Restarting the app
+    /// (or toggling clean_profile_per_launch off and on) rotates to
+    /// a fresh throwaway.
+    #[serde(default)] pub reuse_clean_profile: bool,
     /// When true, every release we ever fetch is persisted to a sqlite
     /// `release_cache` table. Subsequent fetches break out of
     /// pagination as soon as they hit a tag we already know about, so
@@ -74,7 +82,13 @@ pub struct Gui {
     /// (e.g. AppData on C: → a roomier D: partition). Other data dirs
     /// — profiles, cache/downloads, db — are unaffected.
     #[serde(default)] pub versions_dir: String,
+    /// Where the Settings collapsing panel is shown:
+    /// `"versions"` (default) / `"lists"` / `"both"`. Lets the user
+    /// reach Settings without switching tabs while testing.
+    #[serde(default = "default_settings_location")] pub settings_location: String,
 }
+
+fn default_settings_location() -> String { "versions".into() }
 
 fn default_true() -> bool { true }
 
@@ -98,9 +112,11 @@ impl Default for Gui {
             default_args_enabled: false,
             default_args: String::new(),
             clean_profile_per_launch: false,
+            reuse_clean_profile: false,
             incremental_release_cache: true,
             launch_as_admin: false,
             versions_dir: String::new(),
+            settings_location: "versions".into(),
         }
     }
 }
