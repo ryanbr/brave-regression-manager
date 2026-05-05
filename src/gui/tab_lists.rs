@@ -45,24 +45,54 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     }
                 }
             });
-        if !sel.is_empty() { state.selected_profile = Some(sel); }
+        if !sel.is_empty()
+            && state.selected_profile.as_deref() != Some(sel.as_str())
+        {
+            crate::console::info(&state.console, "profile",
+                format!("selected profile: '{sel}'"));
+            state.selected_profile = Some(sel);
+        }
 
         if ui.button("+ New profile").clicked() {
             let name = format!("profile-{}", chrono::Utc::now().timestamp());
-            if let Err(e) = profile::create(&name) {
-                state.status_msg = format!("new profile failed: {e}");
-            } else {
-                state.profiles = profile::list().unwrap_or_default()
-                    .into_iter().map(|p| p.name).collect();
-                state.selected_profile = Some(name);
+            match profile::create(&name) {
+                Err(e) => {
+                    crate::console::error(&state.console, "profile",
+                        format!("new profile '{name}' failed: {e:#}"));
+                    state.status_msg = format!("new profile failed: {e}");
+                }
+                Ok(_) => {
+                    state.profiles = profile::list().unwrap_or_default()
+                        .into_iter().map(|p| p.name).collect();
+                    state.selected_profile = Some(name.clone());
+                    crate::console::info(&state.console, "profile",
+                        format!("created profile '{name}' at {}",
+                            paths::profile_dir(&name).display()));
+                }
             }
         }
 
         if ui.button("Reset…").clicked() {
             if let Some(p) = &state.selected_profile {
                 let dir = paths::profile_dir(p);
-                let _ = profile::reset::reset_profile(&dir, profile::reset::ResetScope::Full);
-                state.status_msg = format!("reset {p}");
+                let p = p.clone();
+                crate::console::info(&state.console, "profile",
+                    format!("resetting profile '{p}' at {}", dir.display()));
+                match profile::reset::reset_profile(&dir, profile::reset::ResetScope::Full) {
+                    Ok(()) => {
+                        crate::console::info(&state.console, "profile",
+                            format!("reset {p}: ok"));
+                        state.status_msg = format!("reset {p}");
+                    }
+                    Err(e) => {
+                        crate::console::error(&state.console, "profile",
+                            format!("reset {p} failed: {e:#}"));
+                        state.status_msg = format!("reset {p} failed: {e}");
+                    }
+                }
+            } else {
+                crate::console::warn(&state.console, "profile",
+                    "no profile selected — pick one before Reset");
             }
         }
     });
@@ -260,10 +290,22 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Save").clicked() {
+                            crate::console::info(&state.console, "list",
+                                format!("saving '{}' -> {}", list.name, list.path.display()));
                             ListEditorState::save_current(&list, &mut state.status_msg);
+                            // status_msg is the source of truth for
+                            // success/failure; mirror it to the
+                            // Console so the action leaves a record.
+                            crate::console::info(&state.console, "list",
+                                format!("save result: {}", state.status_msg));
                         }
                         if ui.button("Restore original").clicked() {
+                            crate::console::info(&state.console, "list",
+                                format!("restoring '{}' from -org backup ({} )",
+                                    list.name, list.path.display()));
                             ListEditorState::restore_current(&list, &mut state.status_msg);
+                            crate::console::info(&state.console, "list",
+                                format!("restore result: {}", state.status_msg));
                         }
                         if ui.button("Show diff")
                             .on_hover_text(
@@ -279,6 +321,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             if applying { "Applying…" } else { "Apply & Launch Brave" }
                         )).clicked() {
                             if let (Some(tag), Some(prof)) = (state.selected_tag.clone(), state.selected_profile.clone()) {
+                                crate::console::info(&state.console, "apply",
+                                    format!("applying edited list '{}' and relaunching {tag} \
+                                             on profile '{prof}'", list.name));
                                 ListEditorState::save_current(&list, &mut state.status_msg);
                                 state.applying = true;
                                 let slot = state.slots.apply_done.clone();
@@ -287,6 +332,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                         .map_err(|e| e.to_string());
                                     *slot.lock().unwrap() = Some(result);
                                 });
+                            } else {
+                                crate::console::warn(&state.console, "apply",
+                                    "Apply & Launch needs both a Brave version and a profile selected");
                             }
                         }
                     });
