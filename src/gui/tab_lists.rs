@@ -119,7 +119,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         (None, "standard app profile".to_string())
                     }
                 };
-                if let Some(p) = &custom {
+                if let Some(p) = custom.as_ref() {
                     crate::console::info(&state.console, "profile", format!(
                         "source={src}  path={}", p.display()));
                 } else {
