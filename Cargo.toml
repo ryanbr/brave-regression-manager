@@ -21,7 +21,11 @@ tokio       = { version = "1", default-features = false, features = [
 anyhow      = "1"
 thiserror   = "1"
 serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
+# preserve_order keeps Brave's pref keys in their original order on
+# read+write — without it every atomic Preferences write reshuffles
+# keys alphabetically, blowing up backup diffs and being hostile to
+# anyone diffing the file by hand.
+serde_json  = { version = "1", features = ["preserve_order"] }
 toml        = "0.8"
 clap        = { version = "4", features = ["derive"] }
 tracing     = "0.1"
@@ -81,6 +85,10 @@ rfd         = { version = "0.17", default-features = false, features = ["xdg-por
 # misc
 chrono      = { version = "0.4", features = ["serde"] }
 uuid        = { version = "1", features = ["v4", "serde"] }
+# OS process-list scan — used to refuse list edits while *any* Brave
+# is running, including ones launched outside the GUI (Start menu,
+# CLI, etc). Mirrors boce's approach.
+sysinfo     = { version = "0.32", default-features = false, features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [

@@ -21,7 +21,15 @@ pub struct EnabledList {
 
 /// IDs are stable across Brave versions.
 const DEFAULT_COMPONENT_ID:  &str = "cffkpbalmllkdoenhmdmpbkajipdjfam";
-const REGIONAL_CATALOG_ID:   &str = "gccbbnhkhcdjncjfbknbnepflcabamhf";
+/// Brave's regional list catalog component has shifted IDs across
+/// versions:
+///   gkboaolpopklhgplhaaiboijnklogmbc — modern (matches boce)
+///   gccbbnhkhcdjncjfbknbnepflcabamhf — older / alternate channel
+/// Probe both; keep the first that resolves on disk.
+const REGIONAL_CATALOG_IDS:  &[&str] = &[
+    "gkboaolpopklhgplhaaiboijnklogmbc",
+    "gccbbnhkhcdjncjfbknbnepflcabamhf",
+];
 
 /// Read enabled adblock lists for a Brave profile.
 ///
@@ -50,10 +58,10 @@ pub fn enabled_lists(profile_dir: &Path) -> Result<Vec<EnabledList>> {
 
     // Catalog-driven regional lists.
     let enabled_uuids = read_enabled_regional_uuids(profile_dir).unwrap_or_default();
-    let catalog = match active_component_path(profile_dir, REGIONAL_CATALOG_ID) {
-        Some(p) => super::catalog::load(&p).unwrap_or_default(),
-        None    => Default::default(),
-    };
+    let catalog = REGIONAL_CATALOG_IDS.iter()
+        .find_map(|cid| active_component_path(profile_dir, cid))
+        .map(|p| super::catalog::load(&p).unwrap_or_default())
+        .unwrap_or_default();
     for uuid in enabled_uuids {
         let entry = catalog.get(&uuid);
         let component_id = entry.map(|e| e.component_id.clone()).unwrap_or_default();
@@ -81,7 +89,7 @@ pub fn enabled_lists(profile_dir: &Path) -> Result<Vec<EnabledList>> {
             // The regional catalog component holds an index of regional lists,
             // not a filter list itself — skip it so it doesn't show up as an
             // empty "0 lines" entry in the GUI.
-            if name == REGIONAL_CATALOG_ID { continue; }
+            if REGIONAL_CATALOG_IDS.contains(&name.as_str()) { continue; }
             if let Some(p) = pick_highest_version_dir(&e.path()) {
                 // Only treat folders that contain an actual `list.txt` as
                 // filter lists. Components with only `list_catalog.json`
@@ -144,7 +152,7 @@ pub fn dump_component_dirs(profile_dir: &Path) -> String {
     lines.join("  ·  ")
 }
 
-fn active_component_path(profile_dir: &Path, component_id: &str) -> Option<PathBuf> {
+pub fn active_component_path(profile_dir: &Path, component_id: &str) -> Option<PathBuf> {
     let candidates = [profile_dir.to_path_buf(), profile_dir.join("Default")];
     for root in candidates {
         let comp = root.join(component_id);
@@ -187,11 +195,14 @@ fn first_existing(dir: &Path, names: &[&str]) -> Option<PathBuf> {
     None
 }
 
-/// Parse `Default/Preferences` for `brave.ad_block.regional_filters` map,
-/// returning the UUIDs marked enabled.
+/// Parse `<user-data-dir>/Local State` for `brave.ad_block.regional_filters`,
+/// returning the UUIDs marked enabled. Brave keeps this dict in
+/// Local State (browser-wide), not in the per-profile `Preferences`
+/// file — earlier versions of this code read the wrong file and so
+/// the catalog-driven scan turned up empty for everyone.
 fn read_enabled_regional_uuids(profile_dir: &Path) -> Result<Vec<String>> {
-    let prefs_path = profile_dir.join("Default").join("Preferences");
-    let s = std::fs::read_to_string(&prefs_path)?;
+    let path = profile_dir.join("Local State");
+    let s = std::fs::read_to_string(&path)?;
     let v: Value = serde_json::from_str(&s)?;
     let map = v.pointer("/brave/ad_block/regional_filters")
         .and_then(|x| x.as_object());

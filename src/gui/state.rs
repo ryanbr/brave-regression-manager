@@ -46,6 +46,11 @@ pub type TagMetaQueue = Arc<Mutex<Vec<(String, Result<(), String>)>>>;
 /// parallel installs can complete into the same frame.
 pub type InstallQueue = Arc<Mutex<Vec<(String, Result<String, String>)>>>;
 
+/// Adblock-list action queue: `(component_id, Result<summary, error>)`.
+/// Same shape as InstallQueue — multiple per-list enable/disable
+/// actions can resolve into the same frame.
+pub type ListActionQueue = Arc<Mutex<Vec<(String, Result<String, String>)>>>;
+
 /// Async results that arrive from background tokio tasks.
 #[derive(Debug, Default, Clone)]
 pub struct AsyncSlots {
@@ -69,6 +74,15 @@ pub struct AsyncSlots {
     /// to state.available + sqlite when the user manually requests a
     /// specific tag from the GitHub API.
     pub add_by_tag_done: AsyncSlot<ReleaseRow>,
+    /// Result of a one-shot fetch of Brave's regional adblock-list
+    /// catalog from `brave/adblock-resources` on GitHub. Lands in
+    /// state.regional_catalog when the spawn completes.
+    pub regional_catalog_done:
+        AsyncSlot<crate::lists::catalog::CatalogCache>,
+    /// One-shot per-list enable/disable results — Vec so multiple
+    /// rows can have actions in flight in the same frame. Each entry:
+    /// `(component_id, summary string for the Console)`.
+    pub list_action_done: ListActionQueue,
     /// Result of the background startup-cache load (releases.json +
     /// sqlite incremental merge). Populated once shortly after the
     /// first frame so the window paints immediately and the heavy
@@ -250,6 +264,41 @@ pub struct AppState {
     /// here and reused for every subsequent relaunch of that tag.
     /// Cleared on app restart so new sessions always start fresh.
     pub session_throwaway_dirs: HashMap<String, std::path::PathBuf>,
+    /// Cached `(sample_time, target_set, conflict_present)` from the
+    /// panel render path so we don't pay a process-list scan per
+    /// frame at 60fps. The target_set keys the cache so changing
+    /// profile or throwaway forces a re-scan.
+    pub brave_running_cache: Option<(std::time::Instant, Vec<String>, bool)>,
+    /// In-memory record of every list edit the user has made this
+    /// session: catalog UUID → enabled. Re-applied to whichever
+    /// user-data-dir Brave is about to launch with, so a Brave
+    /// "first launch race" (component-updater hasn't loaded the
+    /// catalog yet, so the UUID is unrecognised at startup) self-
+    /// heals on the next relaunch. Cleared on app restart — the
+    /// user re-applies if they want them remembered.
+    pub regional_overrides: HashMap<String, bool>,
+    /// Snapshot of `regional_filters[uuid].enabled` from the
+    /// selected profile's Local State. Refreshed on profile change
+    /// and after each edit. Used by the catalog grid to show the
+    /// effective on/off state per row (when a UUID isn't in the
+    /// map, the catalog's `default_enabled` is the effective state).
+    pub regional_state_view: HashMap<String, bool>,
+    /// Subscription edits this session: URL -> Set(enabled) | Remove.
+    /// Replayed before every launch alongside `regional_overrides`.
+    pub subscription_overrides: HashMap<String, crate::lists::prefs_edit::SubAction>,
+    /// Loaded snapshot of `list_subscriptions` for the selected
+    /// profile, refreshed when the profile changes. Used by the
+    /// subscriptions panel grid.
+    pub subscriptions_view: Vec<crate::lists::prefs_edit::Subscription>,
+    /// Buffer for the "+ Add subscription" URL input.
+    pub subscription_add_buffer: String,
+    /// Custom filter rules: editor buffer + the text we last loaded
+    /// from disk (for dirty detection and reset).
+    pub custom_filters_original: String,
+    pub custom_filters_buffer:   String,
+    /// Set when the user has hit Save on custom filters this
+    /// session — replayed before every launch.
+    pub custom_filters_override: Option<String>,
     pub launch_as_admin: bool,
     pub versions_dir: String,
     /// "versions" / "lists" / "both" — where the Settings panel
@@ -292,6 +341,16 @@ pub struct AppState {
     pub selected_list: Option<usize>,
     pub seeding: bool,
     pub applying: bool,
+    /// Cached regional adblock-list catalog (Brave's
+    /// `adblock-resources` regional.json). Populated either from the
+    /// on-disk cache at startup or from a fresh fetch. `None` when
+    /// nothing has loaded yet.
+    pub regional_catalog: Option<crate::lists::catalog::CatalogCache>,
+    /// True while the catalog fetch is in flight.
+    pub regional_catalog_loading: bool,
+    /// component_ids whose enable/disable action is currently in
+    /// flight. Buttons in the catalog panel show "…" while present.
+    pub list_action_pending: HashSet<String>,
 
     /// brave-core commit-compare panels, keyed by channel ("Release" /
     /// "Beta" / "Nightly" / "?"). Each channel's GOOD↔BAD bracket gets
@@ -375,6 +434,15 @@ impl AppState {
             clean_profile_per_launch: false,
             reuse_clean_profile: false,
             session_throwaway_dirs: HashMap::new(),
+            brave_running_cache: None,
+            regional_overrides: HashMap::new(),
+            regional_state_view: HashMap::new(),
+            subscription_overrides: HashMap::new(),
+            subscriptions_view: Vec::new(),
+            subscription_add_buffer: String::new(),
+            custom_filters_original: String::new(),
+            custom_filters_buffer: String::new(),
+            custom_filters_override: None,
             launch_as_admin: false,
             versions_dir: String::new(),
             settings_location: "versions".into(),
@@ -394,6 +462,9 @@ impl AppState {
             selected_list: None,
             seeding: false,
             applying: false,
+            regional_catalog: None,
+            regional_catalog_loading: false,
+            list_action_pending: HashSet::new(),
             compare_loading: HashSet::new(),
             compare_results: HashMap::new(),
             compare_errors:  HashMap::new(),

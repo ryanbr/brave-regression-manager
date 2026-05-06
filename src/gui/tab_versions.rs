@@ -401,6 +401,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     }
                     let effective_user_data = custom.clone()
                         .unwrap_or_else(|| crate::paths::profile_dir(&profile));
+                    super::tab_lists::replay_overrides_into(state, &effective_user_data);
                     match versions::launch::launch_with_console(&v.tag, &profile, state.console.clone(), state.brave_log_level, state.freeze_components, extra_args, custom, state.launch_as_admin) {
                         Ok(child) => {
                             let msg = format!("launched {} (profile={})", v.tag,

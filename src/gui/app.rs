@@ -191,6 +191,11 @@ impl App {
         }
         state.installed = crate::versions::list_installed().unwrap_or_default();
         state.manual_release_tags = crate::verdict::manual_release_tags();
+        // Pull the regional-adblock-list catalog off disk if we have
+        // a cached copy. Fresh fetch happens on user demand via the
+        // Adblock Lists tab's catalog panel.
+        state.regional_catalog =
+            crate::lists::catalog::CatalogCache::load_from_disk();
 
         // Single-line settings summary at startup — confirms what got
         // loaded so the user can sanity-check the persisted config.
@@ -541,6 +546,52 @@ impl App {
                 }
             }
         }
+        let drained: Vec<_> = std::mem::take(
+            &mut *self.state.slots.list_action_done.lock().unwrap());
+        for (component_id, res) in drained {
+            self.state.list_action_pending.remove(&component_id);
+            // Refresh the seeded-lists view so the on-disk-checked
+            // ✓ column flips to match.
+            if let Some(p) = &self.state.selected_profile {
+                self.state.lists_for_profile = crate::lists::discover::enabled_lists(
+                    &crate::paths::profile_dir(p)).unwrap_or_default();
+            }
+            match res {
+                Ok(summary) => {
+                    console::info(&self.state.console, "list-edit", &summary);
+                    self.state.status_msg = summary;
+                }
+                Err(e) => {
+                    console::error(&self.state.console, "list-edit", &e);
+                    self.state.status_msg = format!("list edit failed: {e}");
+                }
+            }
+        }
+        if let Some(res) = self.state.slots.regional_catalog_done.lock().unwrap().take() {
+            self.state.regional_catalog_loading = false;
+            match res {
+                Ok(cache) => {
+                    let n = cache.entries.len();
+                    if let Err(e) = cache.save_to_disk() {
+                        console::warn(&self.state.console, "catalog",
+                            format!("could not persist regional catalog: {e:#}"));
+                    }
+                    console::info(&self.state.console, "catalog",
+                        format!("fetched regional catalog: {n} list(s) from {}",
+                            cache.source_url));
+                    self.state.regional_catalog = Some(cache);
+                }
+                Err(e) => {
+                    let hint = fetch_failure_hint(&e);
+                    let line = match hint {
+                        Some(h) => format!("{e}\nhint: {h}"),
+                        None    => e.clone(),
+                    };
+                    console::error(&self.state.console, "catalog", &line);
+                    self.state.status_msg = format!("catalog fetch failed: {e}");
+                }
+            }
+        }
         if let Some(res) = self.state.slots.add_by_tag_done.lock().unwrap().take() {
             self.state.adding_by_tag = false;
             match res {
@@ -631,6 +682,8 @@ impl eframe::App for App {
             || !self.state.compare_loading.is_empty()
             || !self.state.tag_fetch_pending.is_empty()
             || self.state.loading_startup_cache
+            || self.state.regional_catalog_loading
+            || !self.state.list_action_pending.is_empty()
             || self.state.adding_by_tag
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));

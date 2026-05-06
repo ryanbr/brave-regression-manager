@@ -12,6 +12,10 @@ pub mod merge;
 pub mod mutate;
 pub mod apply;
 pub mod retention;
+pub mod prefs;
+pub mod prefs_edit;
+pub mod process_guard;
+pub mod system_brave;
 
 pub async fn handle(cmd: ListsCmd) -> Result<()> {
     paths::ensure_dirs()?;
