@@ -11,8 +11,11 @@ mod state;
 pub fn launch(handle: Handle) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 720.0])
-            .with_min_inner_size([900.0, 560.0]),
+            // Window 60px taller than the original so the
+            // Available-on-GitHub list fits a few additional
+            // release rows at default sizing.
+            .with_inner_size([1000.0, 780.0])
+            .with_min_inner_size([900.0, 620.0]),
         // Don't persist window position/size — eframe's saved state can
         // come back as an awkward shape (e.g. very tall and narrow) from a
         // prior resize, which the layout can't recover from.

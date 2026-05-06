@@ -652,8 +652,11 @@ impl eframe::App for App {
         // build that had eframe persistence enabled) can override our
         // default and produce a mis-sized window.
         if !self.initial_size_applied {
+            // Keep this in lockstep with the with_inner_size in
+            // gui/mod.rs — both paths need to seed the same value
+            // or one of them will fight the other on first paint.
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                egui::Vec2::new(1000.0, 720.0)));
+                egui::Vec2::new(1000.0, 780.0)));
             // Apply the persisted theme on first paint (and any time
             // `state.theme` changes via `apply_theme()` below).
             apply_theme(ctx, &self.state.theme);
