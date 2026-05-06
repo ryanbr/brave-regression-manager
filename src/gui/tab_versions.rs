@@ -529,8 +529,16 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 // when the field loses focus.
                 let buf = state.launch_args_buf.entry(v.tag.clone())
                     .or_insert_with(|| verdict::launch_args(&v.tag));
+                // White + body+1 sized text — the args field reads
+                // dimmer than the rest of the row at the default
+                // Brave-regress dark theme styling, and people miss
+                // the per-tag args they typed.
+                let body_size = egui::TextStyle::Body
+                    .resolve(ui.style()).size;
                 let resp = ui.add(
                     egui::TextEdit::singleline(buf)
+                        .font(egui::FontId::proportional(body_size + 1.0))
+                        .text_color(egui::Color32::WHITE)
                         .desired_width(140.0)
                         .hint_text("extra args (e.g. --js-flags=…)")
                 );
@@ -838,6 +846,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // clickable: first click sorts by that column, repeat clicks
         // toggle ascending / descending. The active column shows ▲/▼.
         if shown > 0 {
+            // Bump the column-header text +1pt over body so the row
+            // reads as a header even at quick glance — matching the
+            // Installed-versions panel's heading-size convention.
+            let header_size =
+                egui::TextStyle::Body.resolve(ui.style()).size + 1.0;
             ui.horizontal(|ui| {
                 let mut header = |ui: &mut Ui, w: f32, text: &str,
                                   col: super::state::AvailSortColumn|
@@ -851,7 +864,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         let color = if active { Color32::from_rgb(220, 200, 100) }
                                     else      { Color32::from_gray(160) };
                         let label = egui::Label::new(
-                            RichText::new(format!("{text}{arrow}")).strong().color(color)
+                            RichText::new(format!("{text}{arrow}"))
+                                .strong().size(header_size).color(color)
                         ).sense(egui::Sense::click());
                         if ui.add(label)
                             .on_hover_text(if active {
@@ -886,10 +900,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.set_min_width(COL_STATUS);
                     ui.set_max_width(COL_STATUS);
                     ui.label(RichText::new("Status / action").strong()
-                        .color(Color32::from_gray(160)));
+                        .size(header_size).color(Color32::from_gray(160)));
                 });
                 ui.label(RichText::new("Comments").strong()
-                    .color(Color32::from_gray(160)));
+                    .size(header_size).color(Color32::from_gray(160)));
             });
             ui.separator();
         }
