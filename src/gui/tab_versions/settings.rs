@@ -121,6 +121,30 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                 }
                 ui.end_row();
 
+                ui.label("Suppress P3A banner:");
+                let mut p3a = state.suppress_p3a_banner;
+                if ui.checkbox(&mut p3a, "").on_hover_text(
+                    "When ON, the following keys are written to \
+                     <user-data-dir>/Local State before every Brave launch:\n\
+                       - brave.p3a.notice_acknowledged = true\n\
+                       - brave.p3a.enabled             = false\n\
+                       - brave.stats.reporting_enabled = false\n\
+                     Hides Brave's first-run P3A telemetry consent banner \
+                     and stops the P3A + DAU stats subsystems from pinging \
+                     home. Atomic + verify; no-op when state is already \
+                     correct (no per-launch backup file).\n\n\
+                     When OFF: stock Brave behaviour. Existing values are \
+                     NOT reset — turn on briefly to dismiss, then off if \
+                     you want full Brave behaviour after."
+                ).changed() {
+                    state.suppress_p3a_banner = p3a;
+                    state.config_dirty = true;
+                    crate::console::info(&state.console, "config",
+                        if p3a { "suppress_p3a_banner on next launch: ON" }
+                        else   { "suppress_p3a_banner on next launch: OFF" });
+                }
+                ui.end_row();
+
                 ui.label("Channels:").on_hover_text(
                     "Which Brave release channels to include in the available list. \
                      At least one must be checked.");

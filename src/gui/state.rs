@@ -278,6 +278,12 @@ pub struct AppState {
     /// to `extensions.install.deny_list` in Default/Preferences
     /// before every launch.
     pub block_drive_launcher: bool,
+    /// Mirror of `cfg.gui.suppress_p3a_banner`. When on,
+    /// brave.p3a.notice_acknowledged = true (banner dismissed) +
+    /// brave.p3a.enabled = false + brave.stats.reporting_enabled
+    /// = false are written to <user-data-dir>/Local State before
+    /// every launch.
+    pub suppress_p3a_banner: bool,
     pub theme: String,
     pub channel_release: bool,
     pub channel_beta:    bool,
@@ -481,6 +487,7 @@ impl AppState {
             github_token: String::new(),
             freeze_components: false,
             block_drive_launcher: true,
+            suppress_p3a_banner: true,
             theme: "dark".into(),
             channel_release: false,
             channel_beta:    false,

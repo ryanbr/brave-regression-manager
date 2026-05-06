@@ -1382,6 +1382,17 @@ pub(crate) fn replay_overrides_into(state: &mut AppState, user_data_dir: &std::p
                     user_data_dir.display())),
         }
     }
+    if state.suppress_p3a_banner {
+        match crate::lists::prefs_edit::ensure_p3a_dismissed(user_data_dir) {
+            Ok(None) => {} // already correct, no log noise
+            Ok(Some(_)) => crate::console::info(&state.console, "p3a",
+                format!("suppressed P3A banner in {}/Local State",
+                    user_data_dir.display())),
+            Err(e) => crate::console::error(&state.console, "p3a",
+                format!("p3a write to {} failed: {e:#}",
+                    user_data_dir.display())),
+        }
+    }
 }
 
 /// Throttled wrapper around `process_guard::brave_running_for_targets`.

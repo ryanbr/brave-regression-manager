@@ -97,6 +97,42 @@ pub fn default_prefs_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("Default").join("Preferences")
 }
 
+/// Pre-write the `Local State` keys Brave reads to decide whether
+/// to surface the first-run P3A telemetry banner. With these set,
+/// the banner stays hidden and the P3A subsystem doesn't ping
+/// home. Idempotent — re-runs on already-correct files are a
+/// no-op via the same short-circuit pattern as
+/// `ensure_extension_blocklist`.
+pub fn ensure_p3a_dismissed(profile_dir: &Path) -> Result<Option<PathBuf>> {
+    // Resolve to a Value tree, set 3 keys, atomic-write back.
+    // Local State (the file we already operate on for adblock) is
+    // also where Brave keeps `brave.p3a.*` and
+    // `brave.stats.reporting_enabled`.
+    let mut root = read_or_empty(profile_dir)?;
+    let already_correct = root.pointer("/brave/p3a/notice_acknowledged")
+            .and_then(|v| v.as_bool()) == Some(true)
+        && root.pointer("/brave/p3a/enabled")
+            .and_then(|v| v.as_bool()) == Some(false)
+        && root.pointer("/brave/stats/reporting_enabled")
+            .and_then(|v| v.as_bool()) == Some(false);
+    if already_correct { return Ok(None); }
+    set_path(&mut root, "brave.p3a.notice_acknowledged", Value::Bool(true))?;
+    set_path(&mut root, "brave.p3a.enabled",             Value::Bool(false))?;
+    set_path(&mut root, "brave.stats.reporting_enabled", Value::Bool(false))?;
+    let backup = write_atomic(profile_dir, &root)?;
+    // Verify all three round-tripped before returning success.
+    let disk = read_or_empty(profile_dir)?;
+    let ack = disk.pointer("/brave/p3a/notice_acknowledged").and_then(|v| v.as_bool());
+    let p3a = disk.pointer("/brave/p3a/enabled").and_then(|v| v.as_bool());
+    let stt = disk.pointer("/brave/stats/reporting_enabled").and_then(|v| v.as_bool());
+    if ack != Some(true) || p3a != Some(false) || stt != Some(false) {
+        return Err(anyhow!(
+            "verify failed at {}: p3a state ack={ack:?} enabled={p3a:?} \
+             stats_reporting={stt:?}", prefs_path(profile_dir).display()));
+    }
+    Ok(backup)
+}
+
 /// Read+modify+atomic-write `Default/Preferences` to make Brave
 /// behave as if the given extensions were never there:
 ///

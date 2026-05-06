@@ -38,6 +38,15 @@ pub struct Gui {
     /// badge). Default ON — most regression-testing workflows
     /// don't want stock Brave's bundled Drive integration.
     #[serde(default = "default_true")] pub block_drive_launcher: bool,
+    /// Suppress Brave's first-run P3A telemetry consent banner by
+    /// pre-writing the relevant `Local State` keys before launch:
+    ///   brave.p3a.notice_acknowledged = true
+    ///   brave.p3a.enabled             = false
+    ///   brave.stats.reporting_enabled = false
+    /// Default ON — most regression-testing workflows don't want
+    /// the banner re-appearing on every fresh throwaway and don't
+    /// want the test browser pinging home either.
+    #[serde(default = "default_true")] pub suppress_p3a_banner: bool,
     /// Saved position of the per-tag Note editor window so a user
     /// who's dragged it doesn't have to re-place it every time
     /// they reopen the app. `[x, y]` in egui screen coords. None
@@ -119,6 +128,7 @@ impl Default for Gui {
             github_token: String::new(),
             freeze_components: false,
             block_drive_launcher: true,
+            suppress_p3a_banner: true,
             note_window_pos: None,
             theme: "dark".into(),
             channel_release: false,
