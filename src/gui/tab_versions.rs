@@ -1495,19 +1495,28 @@ fn render_compare_one(
             // both pinned Chromium versions are known (best for Stable /
             // Beta whose Chromium pins are usually tagged); date-bounded
             // commits/main as a fallback (Nightly's tip-of-tree pins
-            // often aren't tagged).
-            let chromium_url = match (&older_chr, &newer_chr) {
-                (Some(a), Some(b)) => Some(
-                    format!("https://github.com/chromium/chromium/compare/{a}...{b}")),
-                _ => match (&older_date, &newer_date) {
+            // often aren't tagged). When both tags pin the *same*
+            // Chromium version the compare would be A...A (empty) so we
+            // hide the button entirely and surface a weak label so the
+            // user sees why it isn't there.
+            let same_chromium = matches!((&older_chr, &newer_chr),
+                (Some(a), Some(b)) if a == b);
+            let chromium_url = if same_chromium {
+                None
+            } else {
+                match (&older_chr, &newer_chr) {
                     (Some(a), Some(b)) => Some(
-                        // ±2 day padding: Chromium commits land days before
-                        // Brave Nightly pins them, and there's a tail of
-                        // late-arriving fixes after the pin too.
-                        format!("https://github.com/chromium/chromium/commits/main\
-                                 ?since={a}&until={b}")),
-                    _ => None,
-                },
+                        format!("https://github.com/chromium/chromium/compare/{a}...{b}")),
+                    _ => match (&older_date, &newer_date) {
+                        (Some(a), Some(b)) => Some(
+                            // ±2 day padding: Chromium commits land days before
+                            // Brave Nightly pins them, and there's a tail of
+                            // late-arriving fixes after the pin too.
+                            format!("https://github.com/chromium/chromium/commits/main\
+                                     ?since={a}&until={b}")),
+                        _ => None,
+                    },
+                }
             };
             if let Some(url) = chromium_url {
                 let hover = match (&older_chr, &newer_chr) {
@@ -1523,6 +1532,11 @@ fn render_compare_one(
                 if ui.button("Chromium").on_hover_text(hover).clicked() {
                     crate::console::info(&state.console, "compare", &url);
                     open_url(&url);
+                }
+            } else if same_chromium {
+                if let (Some(a), Some(_)) = (&older_chr, &newer_chr) {
+                    super::app::weak_label(ui, format!(
+                        "(Chromium {a} unchanged)"));
                 }
             }
             if has_result && ui.small_button("×")
@@ -1554,11 +1568,20 @@ fn render_compare_one(
             ui.add(egui::TextEdit::singleline(&mut entry.1)
                 .desired_width(120.0)
                 .hint_text("147.0.7727.137"));
-            let can_compare = !entry.0.trim().is_empty() && !entry.1.trim().is_empty();
+            let trimmed_a = entry.0.trim();
+            let trimmed_b = entry.1.trim();
+            let nonempty = !trimmed_a.is_empty() && !trimmed_b.is_empty();
+            let differ = trimmed_a != trimmed_b;
+            let can_compare = nonempty && differ;
+            let hover = if nonempty && !differ {
+                format!("Both Chromium tags are {trimmed_a} — \
+                         compare/A...A would be empty.")
+            } else {
+                format!("https://github.com/chromium/chromium/compare/{}...{}",
+                    trimmed_a, trimmed_b)
+            };
             if ui.add_enabled(can_compare, egui::Button::new("Open compare"))
-                .on_hover_text(format!(
-                    "https://github.com/chromium/chromium/compare/{}...{}",
-                    entry.0.trim(), entry.1.trim()))
+                .on_hover_text(hover)
                 .clicked()
             {
                 let url = format!(
