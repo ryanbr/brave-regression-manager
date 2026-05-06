@@ -78,6 +78,17 @@ fn init_conn() -> Result<Connection> {
     paths::ensure_dirs()?;
     let path = paths::db_dir().join("verdicts.sqlite");
     let conn = Connection::open(path)?;
+    // WAL journal lets readers and writers interleave instead of
+    // blocking each other on the rollback journal; halves write
+    // latency too (no per-commit fsync of the journal). synchronous
+    // = NORMAL is the WAL companion (FULL is unnecessary in WAL).
+    // 5s busy_timeout means a contended lock retries internally
+    // instead of returning SQLITE_BUSY immediately, so concurrent
+    // upserts during the incremental release_cache merge don't
+    // surface as transient failures to the caller.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.execute_batch(r#"
         CREATE TABLE IF NOT EXISTS version_verdict (
             tag TEXT PRIMARY KEY, verdict TEXT NOT NULL, note TEXT,

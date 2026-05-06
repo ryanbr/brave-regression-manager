@@ -193,7 +193,19 @@ pub async fn install_tag_with_asset_console(
         crate::console::info(c, "install",
             format!("{tag}: phase=extract → {}", dest.display()));
     }
-    extract(&download_path, &dest)
+    // Extract is CPU + disk bound and runs for ~10-20s. Doing it
+    // directly inside this async fn would monopolize one of tokio's
+    // ~N=cpu-count worker threads for the whole duration; with the
+    // 8-parallel-install cap that pins every worker and starves
+    // every other async task in the runtime (download progress
+    // updates, compare fetches, anything else in flight). Hand it
+    // to the blocking pool (separate, default 512 threads, grows
+    // on demand) so workers stay free.
+    let dl_for_extract = download_path.clone();
+    let dst_for_extract = dest.clone();
+    tokio::task::spawn_blocking(move || extract(&dl_for_extract, &dst_for_extract))
+        .await
+        .map_err(|e| anyhow!("extract task panicked: {e}"))?
         .with_context(|| format!("extracting {} → {}", download_path.display(), dest.display()))?;
 
     // macOS Gatekeeper marks anything we downloaded over HTTP as quarantined,
