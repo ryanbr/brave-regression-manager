@@ -38,6 +38,11 @@ pub fn versions_dir() -> PathBuf {
 }
 pub fn profiles_dir() -> PathBuf  { data_root().join("profiles") }
 pub fn downloads_dir() -> PathBuf { data_root().join("cache/downloads") }
+/// Pre-extracted Brave version trees parked here on Uninstall so a
+/// subsequent re-install can atomic-rename them straight back into
+/// `versions/` instead of re-running the slow zip extract phase.
+pub fn extracted_cache_dir() -> PathBuf { data_root().join("cache/extracted") }
+pub fn extracted_cache_for(tag: &str) -> PathBuf { extracted_cache_dir().join(tag) }
 pub fn db_dir() -> PathBuf        { data_root().join("db") }
 pub fn config_path() -> PathBuf   { data_root().join("config.toml") }
 pub fn releases_cache_path() -> PathBuf { data_root().join("cache/releases.json") }

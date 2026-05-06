@@ -101,6 +101,68 @@ pub async fn install_tag_with_asset_console(
     console: Option<crate::console::Handle>,
 ) -> Result<PathBuf> {
     paths::ensure_dirs()?;
+    let dest = paths::version_dir(tag);
+
+    // Already-installed shortcut. If the binary is present, the user
+    // probably clicked Install on a tag they already have on disk
+    // — don't tear it down and re-extract.
+    if paths::brave_binary(tag).exists() {
+        if let Some(c) = &console {
+            crate::console::info(c, "install",
+                format!("{tag}: phase=already-installed (no-op, binary at {})",
+                    paths::brave_binary(tag).display()));
+        }
+        return Ok(dest);
+    }
+
+    // Pre-extracted cache hit. Uninstall (Del) parks the version
+    // tree under cache/extracted/<tag>/ via an atomic rename;
+    // mirror it back here for a near-instant install. Falls back
+    // to the full download + extract path on cross-volume rename
+    // failure (data-root and versions-dir-override on different
+    // disks) — the cached file lingers for next time.
+    let extracted_cache = paths::extracted_cache_for(tag);
+    if extracted_cache.is_dir()
+        && extracted_cache.join(paths::brave_binary(tag).file_name()
+                .map(|n| n.to_owned()).unwrap_or_default()).exists()
+    {
+        // Tighter probe: any brave-binary-named file under the
+        // cached tree (the file_name() join only works for flat
+        // top-level layouts; some channels nest under Brave-Browser
+        // / Brave-Browser.app / etc — fall through to a recursive
+        // probe via paths::brave_binary semantics after the rename).
+        if let Some(parent) = dest.parent() { std::fs::create_dir_all(parent)?; }
+        if dest.exists() { std::fs::remove_dir_all(&dest)?; }
+        match std::fs::rename(&extracted_cache, &dest) {
+            Ok(()) => {
+                if !paths::brave_binary(tag).exists() {
+                    if let Some(c) = &console {
+                        crate::console::warn(c, "install", format!(
+                            "{tag}: extracted-cache rename succeeded but binary \
+                             missing — cache was stale, falling back to extract"));
+                    }
+                    let _ = std::fs::remove_dir_all(&dest);
+                } else {
+                    if let Some(c) = &console {
+                        crate::console::info(c, "install",
+                            format!("{tag}: phase=skip-extract (extracted-cache hit, \
+                                     atomic rename from {})",
+                                extracted_cache.display()));
+                    }
+                    return Ok(dest);
+                }
+            }
+            Err(e) => {
+                if let Some(c) = &console {
+                    crate::console::warn(c, "install", format!(
+                        "{tag}: extracted-cache rename failed ({e}) — falling \
+                         back to download + extract. Cross-volume? Cache will \
+                         linger and the next same-volume install will use it."));
+                }
+            }
+        }
+    }
+
     let download_path = paths::downloads_dir().join(asset_name);
     let cached = std::fs::metadata(&download_path).map(|m| m.len() == asset_size).unwrap_or(false);
     if let Some(c) = &console {
@@ -122,7 +184,6 @@ pub async fn install_tag_with_asset_console(
     };
     download(asset_url, &download_path, asset_size, tag, asset_name, sink.clone()).await?;
 
-    let dest = paths::version_dir(tag);
     if dest.exists() { std::fs::remove_dir_all(&dest)?; }
     std::fs::create_dir_all(&dest)?;
 

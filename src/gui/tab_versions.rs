@@ -642,20 +642,39 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 if ui.button("Open").on_hover_text("Open install folder").clicked() {
                     open_in_explorer(&v.folder);
                 }
-                if ui.button("Del").on_hover_text("Uninstall (remove version folder)").clicked() {
+                if ui.button("Del").on_hover_text(
+                    "Uninstall (move version folder to extracted cache so a \
+                     future re-install is an instant rename — cache lives at \
+                     <data-root>/cache/extracted/<tag>/, purge via Settings).")
+                    .clicked()
+                {
                     let folder = v.folder.clone();
                     let tag = v.tag.clone();
+                    let cache_dst = crate::paths::extracted_cache_for(&tag);
+                    if let Some(parent) = cache_dst.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    if cache_dst.exists() {
+                        // Older cached copy in the way — drop it so the
+                        // new (more recently installed) copy takes its
+                        // place. Otherwise rename below would refuse on
+                        // most platforms.
+                        let _ = std::fs::remove_dir_all(&cache_dst);
+                    }
                     crate::console::info(&state.console, "uninstall",
-                        format!("removing {tag} → {}", folder.display()));
+                        format!("moving {tag} -> {} (atomic, for fast \
+                         re-install)", cache_dst.display()));
                     let started = std::time::Instant::now();
-                    match std::fs::remove_dir_all(&folder) {
+                    let result = std::fs::rename(&folder, &cache_dst)
+                        .or_else(|_e| {
+                            // Cross-volume rename fails — fall back
+                            // to the original full delete so the user
+                            // still gets the disk back. They lose the
+                            // fast-reinstall affordance for this tag.
+                            std::fs::remove_dir_all(&folder)
+                        });
+                    match result {
                         Ok(()) => {
-                            // The version folder is gone — drop its
-                            // per-tag launch_args row too so a future
-                            // re-install starts from a clean slate
-                            // (and so Clear → Verdicts (uninstalled
-                            // only) doesn't leave orphaned args
-                            // behind).
                             let prior = verdict::launch_args(&tag);
                             if !prior.trim().is_empty() {
                                 let _ = verdict::set_launch_args(&tag, "");
@@ -664,10 +683,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             }
                             state.launch_args_buf.remove(&tag);
                             state.installed = std::sync::Arc::new(
-                versions::list_installed().unwrap_or_default());
+                                versions::list_installed().unwrap_or_default());
                             let secs = started.elapsed().as_secs_f64();
+                            let extracted_cache_present = cache_dst.is_dir();
                             crate::console::info(&state.console, "uninstall",
-                                format!("uninstalled {tag} in {secs:.1}s"));
+                                format!("uninstalled {tag} in {secs:.2}s \
+                                         (extracted-cache: {})",
+                                    if extracted_cache_present { "kept" }
+                                    else { "deleted (cross-volume)" }));
                             state.status_msg = format!("uninstalled {tag}");
                         }
                         Err(e) => {
@@ -2392,32 +2415,33 @@ fn is_opposite_arch_asset(asset_name: &str) -> bool {
     if host_arm { asset_x64 } else { asset_arm }
 }
 
-/// Wipe every file in `cache/downloads/`. Returns `(file_count, bytes)`
-/// for the status-bar summary. Subdirectories are recursed; the
-/// downloads dir itself is preserved (re-creating it would fight with
-/// `paths::ensure_dirs()` on the next install).
+/// Wipe every file in `cache/downloads/` AND `cache/extracted/`.
+/// Returns `(file_count, bytes)` for the status-bar summary.
+/// Subdirectories are recursed; both root dirs themselves are
+/// preserved (re-creating them would fight `paths::ensure_dirs()`
+/// on the next install).
 pub(super) fn remove_cached_downloads() -> std::io::Result<(usize, u64)> {
-    let dir = crate::paths::downloads_dir();
-    if !dir.exists() { return Ok((0, 0)); }
     let mut count = 0usize;
     let mut bytes = 0u64;
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let p = entry.path();
-        let md = entry.metadata()?;
-        if md.is_dir() {
-            // Walk the subtree to tally bytes before removing.
-            for s in walkdir::WalkDir::new(&p).into_iter().flatten() {
-                if s.file_type().is_file() {
-                    bytes += s.metadata().map(|m| m.len()).unwrap_or(0);
-                    count += 1;
+    for dir in [crate::paths::downloads_dir(), crate::paths::extracted_cache_dir()] {
+        if !dir.exists() { continue; }
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let p = entry.path();
+            let md = entry.metadata()?;
+            if md.is_dir() {
+                for s in walkdir::WalkDir::new(&p).into_iter().flatten() {
+                    if s.file_type().is_file() {
+                        bytes += s.metadata().map(|m| m.len()).unwrap_or(0);
+                        count += 1;
+                    }
                 }
+                std::fs::remove_dir_all(&p)?;
+            } else {
+                bytes += md.len();
+                count += 1;
+                std::fs::remove_file(&p)?;
             }
-            std::fs::remove_dir_all(&p)?;
-        } else {
-            bytes += md.len();
-            count += 1;
-            std::fs::remove_file(&p)?;
         }
     }
     Ok((count, bytes))
