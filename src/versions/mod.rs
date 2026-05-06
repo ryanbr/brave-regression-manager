@@ -31,7 +31,18 @@ pub fn list_installed() -> Result<Vec<InstalledVersion>> {
             out.push(InstalledVersion { tag, folder: entry.path(), binary });
         }
     }
-    out.sort_by(|a, b| a.tag.cmp(&b.tag));
+    // Semver-aware newest-first. Lexicographic sort lands `v1.10.0`
+    // before `v1.2.0` which reads as random ordering — sort by the
+    // parsed semver so 1.92.15 reliably tops 1.91.119, and so on.
+    // Tags that fail to parse fall back to a lexicographic compare.
+    out.sort_by(|a, b| {
+        let pa = semver::Version::parse(a.tag.trim_start_matches('v')).ok();
+        let pb = semver::Version::parse(b.tag.trim_start_matches('v')).ok();
+        match (pa, pb) {
+            (Some(va), Some(vb)) => vb.cmp(&va),
+            _                    => b.tag.cmp(&a.tag),
+        }
+    });
     Ok(out)
 }
 
