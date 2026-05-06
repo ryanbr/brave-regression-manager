@@ -120,6 +120,10 @@ fn init_conn() -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS manual_release_tags (
             tag TEXT PRIMARY KEY
         );
+        CREATE TABLE IF NOT EXISTS launch_args_history (
+            args      TEXT PRIMARY KEY,
+            last_used TEXT NOT NULL
+        );
     "#)?;
     Ok(conn)
 }
@@ -164,6 +168,54 @@ pub fn set_launch_args(tag: &str, args: &str) -> Result<()> {
             params![tag, args])?;
     }
     Ok(())
+}
+
+/// Remember a non-empty args string in `launch_args_history` so it
+/// shows up in the per-row dropdown for reuse on other tags. Same
+/// string used twice just bumps `last_used` so the most-recently-
+/// used entries float to the top of the dropdown.
+pub fn add_launch_args_to_history(args: &str) -> Result<()> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() { return Ok(()); }
+    let conn = open()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO launch_args_history(args, last_used) VALUES (?1, ?2)
+         ON CONFLICT(args) DO UPDATE SET last_used = excluded.last_used",
+        params![trimmed, now])?;
+    Ok(())
+}
+
+/// Most-recently-used `limit` distinct launch-arg strings. Used by
+/// the GUI's per-row dropdown.
+pub fn recent_launch_args(limit: usize) -> Result<Vec<String>> {
+    let conn = open()?;
+    let mut stmt = conn.prepare(
+        "SELECT args FROM launch_args_history
+         ORDER BY last_used DESC LIMIT ?1")?;
+    let rows = stmt.query_map(params![limit as i64], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows { out.push(r?); }
+    Ok(out)
+}
+
+/// Drop a single args string from history (the per-row dropdown's
+/// "Forget" item). No-op when not present.
+pub fn forget_launch_args(args: &str) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "DELETE FROM launch_args_history WHERE args = ?1",
+        params![args])?;
+    Ok(())
+}
+
+/// Wipe every row from `launch_args_history` — used by the Settings
+/// panel's "Clear args history" button. Returns the count of rows
+/// removed so the GUI can show a status summary. Per-tag launch_args
+/// (the values typed into each Installed row) are NOT touched.
+pub fn clear_launch_args_history() -> Result<usize> {
+    let conn = open()?;
+    Ok(conn.execute("DELETE FROM launch_args_history", [])?)
 }
 
 /// Split a saved args string into a Vec<String>, treating it as a shell-ish

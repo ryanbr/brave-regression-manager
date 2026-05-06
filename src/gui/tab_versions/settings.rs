@@ -374,29 +374,65 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                      cache/downloads/. Already-installed Brave versions \
                      are NOT touched — only the on-disk archives that \
                      drive the [cached] / Install (cached) shortcut.");
-                if ui.button("Delete cached files").clicked() {
-                    match remove_cached_downloads() {
-                        Ok((n, bytes)) => {
-                            // Refresh `cached` flags on every Available
-                            // row so the [cached] pill / Install (cached)
-                            // labels disappear next frame.
-                            let dl_idx = super::super::state::read_downloads_index();
-                            for r in std::sync::Arc::make_mut(&mut state.available).iter_mut() {
-                                r.refresh_cached_with(&dl_idx);
+                ui.horizontal(|ui| {
+                    if ui.button("Delete cached files").clicked() {
+                        match remove_cached_downloads() {
+                            Ok((n, bytes)) => {
+                                // Refresh `cached` flags on every Available
+                                // row so the [cached] pill / Install (cached)
+                                // labels disappear next frame.
+                                let dl_idx = super::super::state::read_downloads_index();
+                                for r in std::sync::Arc::make_mut(&mut state.available).iter_mut() {
+                                    r.refresh_cached_with(&dl_idx);
+                                }
+                                let mb = bytes as f64 / 1_048_576.0;
+                                crate::console::info(&state.console, "cache",
+                                    format!("removed {n} file(s), freed {mb:.1} MiB"));
+                                state.status_msg = format!(
+                                    "removed {n} cached file(s) ({mb:.1} MiB)");
                             }
-                            let mb = bytes as f64 / 1_048_576.0;
-                            crate::console::info(&state.console, "cache",
-                                format!("removed {n} file(s), freed {mb:.1} MiB"));
-                            state.status_msg = format!(
-                                "removed {n} cached file(s) ({mb:.1} MiB)");
-                        }
-                        Err(e) => {
-                            crate::console::error(&state.console, "cache",
-                                format!("remove cached files failed: {e:#}"));
-                            state.status_msg = format!("remove failed: {e}");
+                            Err(e) => {
+                                crate::console::error(&state.console, "cache",
+                                    format!("remove cached files failed: {e:#}"));
+                                state.status_msg = format!("remove failed: {e}");
+                            }
                         }
                     }
-                }
+                    if ui.button("Clear args history")
+                        .on_hover_text(
+                            "Wipe the dropdown of recently-used custom \
+                             launch args (the v menu next to each \
+                             Installed row's args field). Per-tag args \
+                             you've typed into individual rows are NOT \
+                             touched — only the global recent-args list \
+                             that the dropdown pulls from.")
+                        .clicked()
+                    {
+                        // Snapshot the entries before we DELETE so the
+                        // console line names every string being removed
+                        // — useful when you want a paper trail of "what
+                        // was in there" before nuking.
+                        let snapshot = crate::verdict::recent_launch_args(usize::MAX)
+                            .unwrap_or_default();
+                        for (i, s) in snapshot.iter().enumerate() {
+                            crate::console::info(&state.console, "config",
+                                format!("  [{}] removing args entry: {s}", i + 1));
+                        }
+                        match crate::verdict::clear_launch_args_history() {
+                            Ok(n) => {
+                                crate::console::info(&state.console, "config",
+                                    format!("cleared {n} args history entr(ies)"));
+                                state.status_msg = format!(
+                                    "cleared {n} args history entr(ies)");
+                            }
+                            Err(e) => {
+                                crate::console::error(&state.console, "config",
+                                    format!("clear args history failed: {e:#}"));
+                                state.status_msg = format!("clear failed: {e}");
+                            }
+                        }
+                    }
+                });
 
                 ui.end_row();
 

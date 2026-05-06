@@ -527,29 +527,109 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 // Per-version extra Brave launch args. Loaded from sqlite
                 // on first render, edited in an in-memory buffer, persisted
                 // when the field loses focus.
-                let buf = state.launch_args_buf.entry(v.tag.clone())
-                    .or_insert_with(|| verdict::launch_args(&v.tag));
                 // White + body+1 sized text — the args field reads
                 // dimmer than the rest of the row at the default
                 // Brave-regress dark theme styling, and people miss
                 // the per-tag args they typed.
                 let body_size = egui::TextStyle::Body
                     .resolve(ui.style()).size;
-                let resp = ui.add(
-                    egui::TextEdit::singleline(buf)
-                        .font(egui::FontId::proportional(body_size + 1.0))
-                        .text_color(egui::Color32::WHITE)
-                        .desired_width(140.0)
-                        .hint_text("extra args (e.g. --js-flags=…)")
-                );
-                if resp.lost_focus() {
-                    let _ = verdict::set_launch_args(&v.tag, buf);
-                    crate::console::info(&state.console, "config",
-                        if buf.trim().is_empty() {
-                            format!("cleared launch args for {}", v.tag)
-                        } else {
-                            format!("saved launch args for {}: {buf}", v.tag)
+                // Render the TextEdit in an inner block so the
+                // mutable borrow on state.launch_args_buf drops
+                // before the dropdown menu (which needs &mut state
+                // to mutate the buffer when a history entry is
+                // chosen).
+                let just_saved: Option<String> = {
+                    let buf = state.launch_args_buf.entry(v.tag.clone())
+                        .or_insert_with(|| verdict::launch_args(&v.tag));
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(buf)
+                            .font(egui::FontId::proportional(body_size + 1.0))
+                            .text_color(egui::Color32::WHITE)
+                            .desired_width(140.0)
+                            .hint_text("extra args (e.g. --js-flags=…)")
+                    );
+                    if resp.lost_focus() {
+                        let _ = verdict::set_launch_args(&v.tag, buf);
+                        crate::console::info(&state.console, "config",
+                            if buf.trim().is_empty() {
+                                format!("cleared launch args for {}", v.tag)
+                            } else {
+                                format!("saved launch args for {}: {buf}", v.tag)
+                            });
+                        Some(buf.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(s) = &just_saved {
+                    // Record into the global history so the dropdown
+                    // can offer it on other rows. Empty strings are
+                    // a no-op inside `add_launch_args_to_history`.
+                    let _ = verdict::add_launch_args_to_history(s);
+                }
+                // Dropdown of recent launch-arg strings used on any
+                // row. Click an entry to copy it into THIS row's
+                // buffer + persist. Lets you reuse `--js-flags=…`
+                // across installed versions without retyping.
+                let mut chosen: Option<String> = None;
+                let mut to_forget: Option<String> = None;
+                // Pull more entries than fit visibly so the scroll
+                // gives you real depth — sorted newest-first by SQL.
+                let history = verdict::recent_launch_args(50).unwrap_or_default();
+                ui.menu_button("v", |ui| {
+                    if history.is_empty() {
+                        ui.label(egui::RichText::new("(no history yet)")
+                            .color(egui::Color32::from_gray(140)));
+                    } else {
+                        ui.label(egui::RichText::new("Recent custom args").strong());
+                        ui.separator();
+                        // Show 6 rows then scroll. row_h is the same
+                        // unit egui uses for default widget heights,
+                        // so the cutoff lines up cleanly with the 6th
+                        // entry rather than slicing through it.
+                        let row_h = ui.spacing().interact_size.y + 2.0;
+                        egui::ScrollArea::vertical()
+                            .id_source(("launch_args_history", &v.tag))
+                            .max_height(row_h * 6.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui|
+                        {
+                            for h in &history {
+                                ui.horizontal(|ui| {
+                                    if ui.add(egui::Button::new(
+                                        egui::RichText::new(h).monospace())
+                                        .small().fill(egui::Color32::TRANSPARENT))
+                                        .on_hover_text("Apply to this row")
+                                        .clicked()
+                                    {
+                                        chosen = Some(h.clone());
+                                        ui.close_menu();
+                                    }
+                                    if ui.small_button("x")
+                                        .on_hover_text("Forget this entry")
+                                        .clicked()
+                                    {
+                                        to_forget = Some(h.clone());
+                                        ui.close_menu();
+                                    }
+                                });
+                            }
                         });
+                    }
+                }).response.on_hover_text(
+                    "Pick from recently-used custom launch args. \
+                     Sorted newest-first; scrolls past 6.");
+                if let Some(s) = chosen {
+                    state.launch_args_buf.insert(v.tag.clone(), s.clone());
+                    let _ = verdict::set_launch_args(&v.tag, &s);
+                    let _ = verdict::add_launch_args_to_history(&s);
+                    crate::console::info(&state.console, "config",
+                        format!("applied history args to {}: {s}", v.tag));
+                }
+                if let Some(s) = to_forget {
+                    let _ = verdict::forget_launch_args(&s);
+                    crate::console::info(&state.console, "config",
+                        format!("forgot args from history: {s}"));
                 }
 
                 if ui.button("Open").on_hover_text("Open install folder").clicked() {
@@ -563,6 +643,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     let started = std::time::Instant::now();
                     match std::fs::remove_dir_all(&folder) {
                         Ok(()) => {
+                            // The version folder is gone — drop its
+                            // per-tag launch_args row too so a future
+                            // re-install starts from a clean slate
+                            // (and so Clear → Verdicts (uninstalled
+                            // only) doesn't leave orphaned args
+                            // behind).
+                            let prior = verdict::launch_args(&tag);
+                            if !prior.trim().is_empty() {
+                                let _ = verdict::set_launch_args(&tag, "");
+                                crate::console::info(&state.console, "uninstall",
+                                    format!("dropped per-tag launch args for {tag}: {prior}"));
+                            }
+                            state.launch_args_buf.remove(&tag);
                             state.installed = versions::list_installed().unwrap_or_default();
                             let secs = started.elapsed().as_secs_f64();
                             crate::console::info(&state.console, "uninstall",
