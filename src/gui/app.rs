@@ -158,6 +158,8 @@ impl App {
         state.github_token    = cfg.gui.github_token.clone();
         state.freeze_components = cfg.gui.freeze_components;
         state.block_drive_launcher = cfg.gui.block_drive_launcher;
+        state.note_window_pos = cfg.gui.note_window_pos
+            .map(|[x, y]| egui::pos2(x, y));
         state.theme = cfg.gui.theme.clone();
         state.channel_release = cfg.gui.channel_release;
         state.channel_beta    = cfg.gui.channel_beta;
@@ -308,6 +310,8 @@ impl App {
         cfg.gui.github_token    = self.state.github_token.clone();
         cfg.gui.freeze_components = self.state.freeze_components;
         cfg.gui.block_drive_launcher = self.state.block_drive_launcher;
+        cfg.gui.note_window_pos = self.state.note_window_pos
+            .map(|p| [p.x, p.y]);
         cfg.gui.theme = self.state.theme.clone();
         cfg.gui.channel_release = self.state.channel_release;
         cfg.gui.channel_beta    = self.state.channel_beta;

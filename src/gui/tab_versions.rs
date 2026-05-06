@@ -1136,6 +1136,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     {
                         state.editing_note_tag = Some(r.tag.clone());
                         state.editing_note_buf = cur_note.clone();
+                        state.note_window_just_opened = true;
                     }
                 });
 
@@ -1245,6 +1246,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         {
                             state.editing_note_tag = Some(r.tag.clone());
                             state.editing_note_buf = cur_note.clone();
+                            state.note_window_just_opened = true;
                         }
                     });
                 }
@@ -1367,12 +1369,32 @@ fn render_note_editor(ui: &mut Ui, state: &mut AppState) {
     let Some(tag) = state.editing_note_tag.clone() else { return };
     let mut open = true;
     let mut close_after = false;
-    egui::Window::new(format!("Note · {tag}"))
+    // Pin a stable area-id so every tag's note editor lives in the
+    // same egui memory slot. Without this the implicit id is the
+    // title text — different per tag — so switching tags makes
+    // egui treat each as a fresh area and our `default_pos` /
+    // capture-on-drag plumbing was per-tag instead of per-window.
+    // Result: the window now consistently reopens where it was
+    // last left, regardless of which tag's note you're editing.
+    let mut win = egui::Window::new(format!("Note · {tag}"))
+        .id(egui::Id::new("note_editor_window"))
         .collapsible(false)
         .resizable(true)
         .default_width(420.0)
-        .open(&mut open)
-        .show(ui.ctx(), |ui|
+        .open(&mut open);
+    // On the very first frame after open, force the position via
+    // current_pos so we beat any stale egui memory from a prior
+    // session. Subsequent frames fall back to default_pos so the
+    // user can drag freely without us fighting their input.
+    let just_opened = std::mem::take(&mut state.note_window_just_opened);
+    if let Some(p) = state.note_window_pos {
+        if just_opened {
+            win = win.current_pos(p);
+        } else {
+            win = win.default_pos(p);
+        }
+    }
+    let inner = win.show(ui.ctx(), |ui|
     {
         ui.add(egui::TextEdit::multiline(&mut state.editing_note_buf)
             .desired_rows(6).desired_width(400.0)
@@ -1403,6 +1425,22 @@ fn render_note_editor(ui: &mut Ui, state: &mut AppState) {
             }
         });
     });
+    // Capture the post-frame window rect and persist when the
+    // top-left moved. ~1px-tolerance comparison so floating-point
+    // jitter from egui's layout doesn't keep marking the config
+    // dirty every frame.
+    if let Some(r) = inner {
+        let pos = r.response.rect.min;
+        let drifted = match state.note_window_pos {
+            Some(prev) => (prev.x - pos.x).abs() > 0.5
+                       || (prev.y - pos.y).abs() > 0.5,
+            None => true,
+        };
+        if drifted {
+            state.note_window_pos = Some(pos);
+            state.config_dirty = true;
+        }
+    }
     if !open || close_after {
         state.editing_note_tag = None;
         state.editing_note_buf.clear();

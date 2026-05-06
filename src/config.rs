@@ -38,6 +38,11 @@ pub struct Gui {
     /// badge). Default ON — most regression-testing workflows
     /// don't want stock Brave's bundled Drive integration.
     #[serde(default = "default_true")] pub block_drive_launcher: bool,
+    /// Saved position of the per-tag Note editor window so a user
+    /// who's dragged it doesn't have to re-place it every time
+    /// they reopen the app. `[x, y]` in egui screen coords. None
+    /// until the window has been moved at least once.
+    #[serde(default)] pub note_window_pos: Option<[f32; 2]>,
     /// UI theme: `"dark"` (default) or `"light"`. Anything else falls
     /// back to dark.
     #[serde(default = "default_theme")] pub theme: String,
@@ -114,6 +119,7 @@ impl Default for Gui {
             github_token: String::new(),
             freeze_components: false,
             block_drive_launcher: true,
+            note_window_pos: None,
             theme: "dark".into(),
             channel_release: false,
             channel_beta:    false,

@@ -407,6 +407,16 @@ pub struct AppState {
     /// the buffer holds the in-progress edit so it survives repaints.
     pub editing_note_tag: Option<String>,
     pub editing_note_buf: String,
+    /// Last user-dragged position of the Note editor window,
+    /// persisted to config.toml on change. None means egui's
+    /// default-centered placement on first open.
+    pub note_window_pos: Option<egui::Pos2>,
+    /// Set to true on every editor-open transition. The render
+    /// path uses it to force `current_pos` for one frame, defeating
+    /// stale egui memory that would otherwise place the window
+    /// where it sat in a prior app run instead of where the user
+    /// most recently left it.
+    pub note_window_just_opened: bool,
 
     pub status_msg: String,
 
@@ -498,6 +508,8 @@ impl AppState {
             installed_panel_height: None,
             editing_note_tag: None,
             editing_note_buf: String::new(),
+            note_window_pos: None,
+            note_window_just_opened: false,
             status_msg: String::new(),
             rt,
             slots: AsyncSlots::default(),
