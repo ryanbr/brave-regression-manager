@@ -1344,12 +1344,18 @@ fn list_edit_targets_for_action(state: &mut AppState) -> Vec<std::path::PathBuf>
     out
 }
 
+/// Application Launcher for Drive — Brave's bundled extension that
+/// surfaces in `chrome://extensions`. Adding this id to
+/// `extensions.install.deny_list` makes Brave refuse to load it on
+/// the next launch.
+const APP_LAUNCHER_FOR_DRIVE_ID: &str = "lmjegmlicamnimmfhcmpkclmigmmcbeh";
+
 /// Re-write every recorded list override into the user-data-dir
 /// Brave is about to launch with. Called from the Relaunch /
 /// Launch click handlers, AFTER any prior Brave was killed and
-/// BEFORE the new spawn. One read → all overrides applied → one
-/// write — atomic, idempotent, covers regional_filters,
-/// list_subscriptions, and custom_filters.
+/// BEFORE the new spawn. Covers regional_filters, list_subscriptions,
+/// custom_filters (atomic single Local State write) and the
+/// extension blocklist (per-profile Preferences edit).
 pub(crate) fn replay_overrides_into(state: &mut AppState, user_data_dir: &std::path::Path) {
     match crate::lists::prefs_edit::replay_all_overrides(
         user_data_dir,
@@ -1364,6 +1370,19 @@ pub(crate) fn replay_overrides_into(state: &mut AppState, user_data_dir: &std::p
         Err(e) => crate::console::error(&state.console, "list-edit",
             format!("override replay to {} failed: {e:#}",
                 user_data_dir.display())),
+    }
+    if state.block_drive_launcher {
+        let ids: &[&str] = &[APP_LAUNCHER_FOR_DRIVE_ID];
+        match crate::lists::prefs_edit::ensure_extension_blocklist(
+            user_data_dir, ids)
+        {
+            Ok(_)  => crate::console::info(&state.console, "ext-block",
+                format!("ensured deny_list contains {ids:?} in {}/Default/Preferences",
+                    user_data_dir.display())),
+            Err(e) => crate::console::error(&state.console, "ext-block",
+                format!("blocklist write to {} failed: {e:#}",
+                    user_data_dir.display())),
+        }
     }
 }
 

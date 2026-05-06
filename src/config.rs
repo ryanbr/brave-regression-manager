@@ -28,6 +28,16 @@ pub struct Gui {
     /// plus the poisoned-URL flag so adblock components stay pinned.
     /// Default OFF — most workflows want fresh components on launch.
     #[serde(default)] pub freeze_components: bool,
+    /// When true, Brave's bundled "Application Launcher for Drive"
+    /// extension (Chrome Web Store id
+    /// `lmjegmlicamnimmfhcmpkclmigmmcbeh`) is added to the
+    /// per-profile `extensions.install.deny_list`,
+    /// `extensions.external_uninstalls`, and its tombstone
+    /// `extensions.settings.<id>` is removed so Brave behaves as
+    /// if the extension was never installed (no "Action required"
+    /// badge). Default ON — most regression-testing workflows
+    /// don't want stock Brave's bundled Drive integration.
+    #[serde(default = "default_true")] pub block_drive_launcher: bool,
     /// UI theme: `"dark"` (default) or `"light"`. Anything else falls
     /// back to dark.
     #[serde(default = "default_theme")] pub theme: String,
@@ -103,6 +113,7 @@ impl Default for Gui {
             brave_log_level: BraveLogLevel::default(),
             github_token: String::new(),
             freeze_components: false,
+            block_drive_launcher: true,
             theme: "dark".into(),
             channel_release: false,
             channel_beta:    false,

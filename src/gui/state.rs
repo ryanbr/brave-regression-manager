@@ -249,6 +249,11 @@ pub struct AppState {
     pub brave_log_level: crate::config::BraveLogLevel,
     pub github_token: String,
     pub freeze_components: bool,
+    /// Mirror of `cfg.gui.block_drive_launcher`. When on, the
+    /// "Application Launcher for Drive" extension's id is added
+    /// to `extensions.install.deny_list` in Default/Preferences
+    /// before every launch.
+    pub block_drive_launcher: bool,
     pub theme: String,
     pub channel_release: bool,
     pub channel_beta:    bool,
@@ -438,6 +443,7 @@ impl AppState {
             brave_log_level: crate::config::BraveLogLevel::Quiet,
             github_token: String::new(),
             freeze_components: false,
+            block_drive_launcher: true,
             theme: "dark".into(),
             channel_release: false,
             channel_beta:    false,

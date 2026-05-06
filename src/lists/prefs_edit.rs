@@ -90,6 +90,123 @@ pub fn prefs_path(profile_dir: &Path) -> PathBuf {
     profile_dir.join("Local State")
 }
 
+/// `<user_data>/Default/Preferences` — per-profile prefs. Used for
+/// the extension blocklist (which Brave reads per-profile, not
+/// browser-wide), among other things we don't currently touch.
+pub fn default_prefs_path(profile_dir: &Path) -> PathBuf {
+    profile_dir.join("Default").join("Preferences")
+}
+
+/// Read+modify+atomic-write `Default/Preferences` to make Brave
+/// behave as if the given extensions were never there:
+///
+///   1. Add to `extensions.install.deny_list`     — refuse to load
+///   2. Add to `extensions.external_uninstalls`   — suppress "Action
+///      required" / "Previously installed external extension"
+///      notifications; tells Chromium the user has uninstalled
+///      this external extension and not to re-add it
+///   3. Remove `extensions.settings.<id>`         — clears the
+///      tombstone Brave keeps for previously-seen extensions
+///   4. Remove `extensions.external_extensions.<id>` (if present)
+///
+/// Without (2)+(3) the deny_list alone leaves a record Brave shows
+/// in chrome://extensions as a "disabled by policy" card with an
+/// Action-required badge.
+///
+/// Existing entries in deny_list / external_uninstalls (added by
+/// other code or by Brave itself) are preserved; we just merge +
+/// dedupe. Verifies the round-trip after rename.
+pub fn ensure_extension_blocklist(
+    profile_dir: &Path,
+    blocked_ids: &[&str],
+) -> Result<Option<PathBuf>> {
+    if blocked_ids.is_empty() { return Ok(None); }
+    let path = default_prefs_path(profile_dir);
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    let mut root: Value = if path.is_file() {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("parsing {}", path.display()))?
+    } else {
+        Value::Object(Default::default())
+    };
+    // (1) deny_list — refuse to load
+    {
+        let mut merged: std::collections::BTreeSet<String> =
+            root.pointer("/extensions/install/deny_list")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+        for id in blocked_ids { merged.insert((*id).to_string()); }
+        let arr: Vec<Value> = merged.iter().map(|s| Value::String(s.clone())).collect();
+        set_path(&mut root, "extensions.install.deny_list", Value::Array(arr))?;
+    }
+    // (2) external_uninstalls — silence "Action required" for
+    //     external/preloaded extensions Brave bundles by default
+    {
+        let mut merged: std::collections::BTreeSet<String> =
+            root.pointer("/extensions/external_uninstalls")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+        for id in blocked_ids { merged.insert((*id).to_string()); }
+        let arr: Vec<Value> = merged.iter().map(|s| Value::String(s.clone())).collect();
+        set_path(&mut root, "extensions.external_uninstalls", Value::Array(arr))?;
+    }
+    // (3) + (4) drop the per-id tombstones so Brave doesn't list
+    // it on chrome://extensions at all.
+    if let Some(settings) = root.pointer_mut("/extensions/settings")
+        .and_then(|v| v.as_object_mut())
+    {
+        for id in blocked_ids { settings.remove(*id); }
+    }
+    if let Some(ext) = root.pointer_mut("/extensions/external_extensions")
+        .and_then(|v| v.as_object_mut())
+    {
+        for id in blocked_ids { ext.remove(*id); }
+    }
+    // Atomic tmp+rename
+    let backup = if path.is_file() {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let bk = path.with_file_name(format!("Preferences.bak-{stamp}"));
+        std::fs::copy(&path, &bk).ok();
+        Some(bk)
+    } else { None };
+    let tmp = path.with_extension("brave-regress.tmp");
+    let body = serde_json::to_string(&root)?;
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)?;
+    // Verify every id is present in deny_list AND external_uninstalls
+    // AND absent from extensions.settings.
+    let raw = std::fs::read_to_string(&path)?;
+    let disk: Value = serde_json::from_str(&raw)?;
+    let arr_to_set = |p: &str| -> std::collections::HashSet<String> {
+        disk.pointer(p)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let in_deny = arr_to_set("/extensions/install/deny_list");
+    let in_uninst = arr_to_set("/extensions/external_uninstalls");
+    let still_in_settings = disk.pointer("/extensions/settings")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect::<std::collections::HashSet<_>>())
+        .unwrap_or_default();
+    for id in blocked_ids {
+        if !in_deny.contains(*id) {
+            return Err(anyhow!("verify: deny_list missing {id} at {}", path.display()));
+        }
+        if !in_uninst.contains(*id) {
+            return Err(anyhow!("verify: external_uninstalls missing {id} at {}", path.display()));
+        }
+        if still_in_settings.contains(*id) {
+            return Err(anyhow!("verify: extensions.settings still has {id} at {}", path.display()));
+        }
+    }
+    Ok(backup)
+}
+
 /// Set `enabled` on the given UUID's entry under
 /// `brave.ad_block.regional_filters`, creating the dict path when
 /// missing. Pure JSON mutation — caller is responsible for the

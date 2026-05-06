@@ -100,6 +100,27 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                 }
                 ui.end_row();
 
+                ui.label("Block Drive launcher:");
+                let mut block = state.block_drive_launcher;
+                if ui.checkbox(&mut block, "").on_hover_text(
+                    "When ON: 'Application Launcher for Drive' (Chrome Web Store id \
+                     lmjegmlicamnimmfhcmpkclmigmmcbeh) is added to \
+                     extensions.install.deny_list in <user-data-dir>/Default/Preferences \
+                     before every Brave launch. Brave refuses to load it on startup.\n\n\
+                     When OFF: stock Brave behaviour. The id is NOT removed from the \
+                     deny_list — toggle this off and re-launch, then edit Preferences \
+                     manually if you want it back.\n\n\
+                     The deny_list is merged with any existing entries; we never remove \
+                     ids placed there by other tools."
+                ).changed() {
+                    state.block_drive_launcher = block;
+                    state.config_dirty = true;
+                    crate::console::info(&state.console, "config",
+                        if block { "block_drive_launcher on next launch: ON" }
+                        else     { "block_drive_launcher on next launch: OFF" });
+                }
+                ui.end_row();
+
                 ui.label("Channels:").on_hover_text(
                     "Which Brave release channels to include in the available list. \
                      At least one must be checked.");

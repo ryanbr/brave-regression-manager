@@ -157,6 +157,7 @@ impl App {
         state.brave_log_level = cfg.gui.brave_log_level;
         state.github_token    = cfg.gui.github_token.clone();
         state.freeze_components = cfg.gui.freeze_components;
+        state.block_drive_launcher = cfg.gui.block_drive_launcher;
         state.theme = cfg.gui.theme.clone();
         state.channel_release = cfg.gui.channel_release;
         state.channel_beta    = cfg.gui.channel_beta;
@@ -232,12 +233,12 @@ impl App {
         } else { state.versions_dir.clone() };
         console::info(&state.console, "settings", format!(
             "theme={}  channels={}  release_count={}  date={}  \
-             log_level={:?}  freeze_components={}  \
+             log_level={:?}  freeze_components={}  block_drive_launcher={}  \
              versions_dir={}  default_profile_folder={}  default_args={}  \
              clean_profile_per_launch={}  reuse_clean_profile={}  \
              launch_as_admin={}  github_token={}  settings_location={}",
             state.theme, chans, state.release_count, date_filter,
-            state.brave_log_level, state.freeze_components,
+            state.brave_log_level, state.freeze_components, state.block_drive_launcher,
             versions_dir_str, prof_dir, def_args,
             state.clean_profile_per_launch, state.reuse_clean_profile,
             state.launch_as_admin, token_str, state.settings_location));
@@ -305,6 +306,7 @@ impl App {
         cfg.gui.brave_log_level = self.state.brave_log_level;
         cfg.gui.github_token    = self.state.github_token.clone();
         cfg.gui.freeze_components = self.state.freeze_components;
+        cfg.gui.block_drive_launcher = self.state.block_drive_launcher;
         cfg.gui.theme = self.state.theme.clone();
         cfg.gui.channel_release = self.state.channel_release;
         cfg.gui.channel_beta    = self.state.channel_beta;
