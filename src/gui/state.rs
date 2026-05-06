@@ -119,8 +119,17 @@ pub struct ReleaseRow {
     pub skip_reason: String,           // empty when host_asset is Some
     /// True when the asset is already downloaded to the cache directory at
     /// the expected size — install can skip the download and go straight to
-    /// extract. Computed at fetch time and refreshed after each install.
-    #[serde(default)]
+    /// extract. Computed at fetch time and refreshed after each install /
+    /// "Delete cached files" / etc.
+    ///
+    /// `serde(skip)` so this is NEVER persisted to the sqlite
+    /// `release_cache` table (or anywhere else): it's a derived
+    /// value that must be recomputed against the current disk
+    /// state on every load. Without this skip, a row written
+    /// while cached=true would come back from sqlite as cached=true
+    /// even after the user wiped the cache files, making the GUI
+    /// promise an Install (cached) shortcut that no longer exists.
+    #[serde(skip, default)]
     pub cached:      bool,
     /// "Release" / "Beta" / "Nightly" — derived from the release's assets at
     /// fetch time so the GUI can label rows without re-inspecting them.
