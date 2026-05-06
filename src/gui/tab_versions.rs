@@ -1462,16 +1462,8 @@ fn render_compare_one(
             .and_then(|(chr, _)| chr.clone())
             .or_else(|| verdict::tag_metadata(tag).0)
     };
-    let lookup_date = |tag: &str| -> Option<String> {
-        row_by_tag.get(tag)
-            .map(|(_, pa)| pa.get(..10).unwrap_or(pa).to_string())
-            .or_else(|| verdict::tag_metadata(tag).1
-                .map(|s| s.get(..10).unwrap_or(&s).to_string()))
-    };
     let older_chr = lookup_chr(older);
     let newer_chr = lookup_chr(newer);
-    let older_date = lookup_date(older);
-    let newer_date = lookup_date(newer);
     ui.group(|ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("[{channel}]")).strong().monospace());
@@ -1500,54 +1492,11 @@ fn render_compare_one(
                 crate::console::info(&state.console, "compare", &url);
                 open_url(&url);
             }
-            // Chromium changes — opens GitHub directly. Tag-compare when
-            // both pinned Chromium versions are known (best for Stable /
-            // Beta whose Chromium pins are usually tagged); date-bounded
-            // commits/main as a fallback (Nightly's tip-of-tree pins
-            // often aren't tagged). When both tags pin the *same*
-            // Chromium version the compare would be A...A (empty) so we
-            // hide the button entirely and surface a weak label so the
-            // user sees why it isn't there.
-            let same_chromium = matches!((&older_chr, &newer_chr),
-                (Some(a), Some(b)) if a == b);
-            let chromium_url = if same_chromium {
-                None
-            } else {
-                match (&older_chr, &newer_chr) {
-                    (Some(a), Some(b)) => Some(
-                        format!("https://github.com/chromium/chromium/compare/{a}...{b}")),
-                    _ => match (&older_date, &newer_date) {
-                        (Some(a), Some(b)) => Some(
-                            // ±2 day padding: Chromium commits land days before
-                            // Brave Nightly pins them, and there's a tail of
-                            // late-arriving fixes after the pin too.
-                            format!("https://github.com/chromium/chromium/commits/main\
-                                     ?since={a}&until={b}")),
-                        _ => None,
-                    },
-                }
-            };
-            if let Some(url) = chromium_url {
-                let hover = match (&older_chr, &newer_chr) {
-                    (Some(a), Some(b)) => format!(
-                        "Chromium tag compare:\nchromium/chromium/compare/{a}...{b}\
-                         \n\nNote: Nightly pins are often untagged → may 404."),
-                    _ => format!(
-                        "Chromium changes by date (approximate):\n{url}\
-                         \n\nUsed when one or both pinned Chromium versions \
-                         aren't recorded yet — re-fetch GitHub releases to \
-                         enable exact tag-compare."),
-                };
-                if ui.button("Chromium").on_hover_text(hover).clicked() {
-                    crate::console::info(&state.console, "compare", &url);
-                    open_url(&url);
-                }
-            } else if same_chromium {
-                if let (Some(a), Some(_)) = (&older_chr, &newer_chr) {
-                    super::app::weak_label(ui, format!(
-                        "(Chromium {a} unchanged)"));
-                }
-            }
+            // (Chromium-compare button + same-pin label removed —
+            // the manual Chromium tag override row below this one
+            // covers the cases where the user actually wants a
+            // chromium/chromium compare. The auto button noise next
+            // to "Open on GitHub" wasn't pulling its weight.)
         });
 
         // ── Chromium tag override row (Design A) ───────────────────────
