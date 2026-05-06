@@ -1484,6 +1484,15 @@ fn render_compare_one(
                 spawn_compare(state, channel.to_string(),
                               older.to_string(), newer.to_string());
             }
+            // Sit the clear-button next to Load/Reload so the
+            // "drop the result" affordance is right where you'd
+            // look for it. Hidden until there's something to drop.
+            if has_result && ui.small_button("x")
+                .on_hover_text("Clear loaded commits").clicked()
+            {
+                state.compare_results.remove(channel);
+                state.compare_errors.remove(channel);
+            }
             if ui.button("Open on GitHub").on_hover_text(format!(
                 "https://github.com/brave/brave-core/compare/{older}...{newer}")).clicked()
             {
@@ -1538,12 +1547,6 @@ fn render_compare_one(
                     super::app::weak_label(ui, format!(
                         "(Chromium {a} unchanged)"));
                 }
-            }
-            if has_result && ui.small_button("×")
-                .on_hover_text("Clear loaded commits").clicked()
-            {
-                state.compare_results.remove(channel);
-                state.compare_errors.remove(channel);
             }
         });
 
@@ -1644,14 +1647,27 @@ fn render_compare_one(
         }
 
         let Some(cr) = state.compare_results.get(channel).cloned() else { return; };
-        ui.horizontal(|ui| {
-            super::app::weak_label(ui, format!(
-                "{} {}..{}  ·  showing {} of {}{}",
-                if cr.commits.is_empty() { "no commits" } else { "" },
-                cr.base, cr.head, cr.commits.len(), cr.total,
-                if cr.truncated { " (capped at 250 by GitHub — open on GitHub for full list)" } else { "" }
-            ));
-        });
+        // Wrap the loaded-commits view in a CollapsingHeader so the
+        // user can fold a long list back up after skimming it
+        // without losing the loaded data (it's still in
+        // state.compare_results — re-opening costs zero network).
+        // id_source includes the channel + bracket endpoints so each
+        // active bracket gets its own collapse state.
+        let header_text = format!(
+            "Loaded commits {}..{}  ·  {}{} of {}{}",
+            cr.base, cr.head,
+            if cr.commits.is_empty() { "no commits — " } else { "" },
+            cr.commits.len(), cr.total,
+            if cr.truncated { " (capped at 250)" } else { "" });
+        egui::CollapsingHeader::new(header_text)
+            .id_source(("compare_commits_collapse", channel, &cr.base, &cr.head))
+            .default_open(true)
+            .show(ui, |ui|
+        {
+        if cr.truncated {
+            super::app::weak_label(ui,
+                "(capped at 250 by GitHub — open on GitHub for full list)");
+        }
         let row_h = ui.spacing().interact_size.y + 2.0;
         egui::ScrollArea::vertical().id_source(("compare_commits", channel))
             .max_height(row_h * 8.0)
@@ -1675,6 +1691,7 @@ fn render_compare_one(
                 });
             }
         });
+        });  // CollapsingHeader.show
     });
 }
 
