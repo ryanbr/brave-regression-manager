@@ -441,6 +441,7 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                         }
                         match crate::verdict::clear_launch_args_history() {
                             Ok(n) => {
+                                state.launch_args_history_cache = None;
                                 crate::console::info(&state.console, "config",
                                     format!("cleared {n} args history entr(ies)"));
                                 state.status_msg = format!(

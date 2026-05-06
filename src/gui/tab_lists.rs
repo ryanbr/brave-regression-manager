@@ -25,7 +25,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         egui::ComboBox::from_id_source("ver")
             .selected_text(if sel_tag.is_empty() { "—".into() } else { sel_tag.clone() })
             .show_ui(ui, |ui| {
-                for v in &installed {
+                for v in installed.iter() {
                     if ui.selectable_label(state.selected_tag.as_deref() == Some(&v.tag), &v.tag).clicked() {
                         sel_tag = v.tag.clone();
                     }
@@ -658,7 +658,6 @@ fn render_regional_catalog_panel(ui: &mut Ui, state: &mut AppState) {
                         ui.end_row();
                         for e in entries.iter() {
                             let on_disk = installed_ids.contains(&e.component_id);
-                            let pending = state.list_action_pending.contains(&e.component_id);
                             // Effective state: explicit override > catalog default.
                             let override_val = state.regional_state_view.get(&e.uuid).copied();
                             let effective = override_val.unwrap_or(e.default_enabled);
@@ -685,13 +684,12 @@ fn render_regional_catalog_panel(ui: &mut Ui, state: &mut AppState) {
                             // effective state. Label reflects what'll
                             // happen on click.
                             let have_profile = state.selected_profile.is_some();
-                            let can_edit = have_profile && !pending && !brave_running;
+                            let can_edit = have_profile && !brave_running;
                             let (label, will_set) = if effective {
                                 ("Disable", false)
                             } else {
                                 ("Enable", true)
                             };
-                            let label = if pending { "..." } else { label };
                             if ui.add_enabled(
                                 can_edit,
                                 egui::Button::new(label))
@@ -1441,9 +1439,6 @@ fn spawn_set_list_enabled(
         state.status_msg = msg;
         return;
     }
-    // We key pending state by component_id (the GUI grid uses it as
-    // a row key) but the actual write key is the catalog UUID.
-    state.list_action_pending.insert(entry.component_id.clone());
     // Record so we can re-apply before every subsequent launch —
     // dodges the first-launch race where Brave drops our flag
     // because the catalog component isn't on disk yet at startup.
@@ -1454,7 +1449,6 @@ fn spawn_set_list_enabled(
         format!("{verb} '{}' (uuid {}): writing regional_filters[{}].enabled={enabled} → {} dir(s)",
             entry.title, entry.uuid, &entry.uuid[..entry.uuid.len().min(8)],
             targets.len()));
-    let component = entry.component_id.clone();
     let uuid = entry.uuid.clone();
     let title = entry.title.clone();
     let mut wrote: Vec<String> = Vec::new();
@@ -1523,7 +1517,6 @@ fn spawn_set_list_enabled(
         crate::console::error(&state.console, "list-edit", &msg);
         state.status_msg = msg;
     }
-    state.list_action_pending.remove(&component);
     // Refresh the on-screen state map so the row's status flips
     // immediately on click — no async indirection now.
     reload_regional_state(state);

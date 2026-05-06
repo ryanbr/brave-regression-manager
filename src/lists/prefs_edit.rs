@@ -131,6 +131,33 @@ pub fn ensure_extension_blocklist(
     } else {
         Value::Object(Default::default())
     };
+    // Short-circuit: if every requested id is already in deny_list
+    // AND in external_uninstalls AND absent from extensions.settings
+    // AND absent from extensions.external_extensions, the on-disk
+    // state already reflects what we want — skip the rewrite (and
+    // dodge the per-launch backup file + mtime bump).
+    {
+        let arr_set = |p: &str| -> std::collections::HashSet<&str> {
+            root.pointer(p).and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default()
+        };
+        let deny    = arr_set("/extensions/install/deny_list");
+        let uninst  = arr_set("/extensions/external_uninstalls");
+        let in_settings = root.pointer("/extensions/settings")
+            .and_then(|v| v.as_object())
+            .map(|m| m.keys().any(|k| blocked_ids.iter().any(|id| k == *id)))
+            .unwrap_or(false);
+        let in_ext = root.pointer("/extensions/external_extensions")
+            .and_then(|v| v.as_object())
+            .map(|m| m.keys().any(|k| blocked_ids.iter().any(|id| k == *id)))
+            .unwrap_or(false);
+        let all_present = blocked_ids.iter().all(|id|
+            deny.contains(*id) && uninst.contains(*id));
+        if all_present && !in_settings && !in_ext {
+            return Ok(None);
+        }
+    }
     // (1) deny_list — refuse to load
     {
         let mut merged: std::collections::BTreeSet<String> =

@@ -46,11 +46,6 @@ pub type TagMetaQueue = Arc<Mutex<Vec<(String, Result<(), String>)>>>;
 /// parallel installs can complete into the same frame.
 pub type InstallQueue = Arc<Mutex<Vec<(String, Result<String, String>)>>>;
 
-/// Adblock-list action queue: `(component_id, Result<summary, error>)`.
-/// Same shape as InstallQueue — multiple per-list enable/disable
-/// actions can resolve into the same frame.
-pub type ListActionQueue = Arc<Mutex<Vec<(String, Result<String, String>)>>>;
-
 /// Async results that arrive from background tokio tasks.
 #[derive(Debug, Default, Clone)]
 pub struct AsyncSlots {
@@ -79,10 +74,6 @@ pub struct AsyncSlots {
     /// state.regional_catalog when the spawn completes.
     pub regional_catalog_done:
         AsyncSlot<crate::lists::catalog::CatalogCache>,
-    /// One-shot per-list enable/disable results — Vec so multiple
-    /// rows can have actions in flight in the same frame. Each entry:
-    /// `(component_id, summary string for the Console)`.
-    pub list_action_done: ListActionQueue,
     /// Result of the background startup-cache load (releases.json +
     /// sqlite incremental merge). Populated once shortly after the
     /// first frame so the window paints immediately and the heavy
@@ -229,7 +220,12 @@ pub struct AppState {
     pub tab: Tab,
 
     // Tab 1: versions
-    pub installed: Vec<InstalledVersion>,
+    /// Installed Brave versions. `Arc` so per-frame snapshots
+    /// (catalog dropdown, render path) take an O(1) clone instead
+    /// of duplicating the whole Vec — same pattern as
+    /// `regional_catalog_entries`. Mutate via `Arc::make_mut` /
+    /// re-assignment with a fresh Arc.
+    pub installed: std::sync::Arc<Vec<InstalledVersion>>,
     /// `Arc<Vec<ReleaseRow>>` rather than a bare `Vec` so the Available
     /// render loop can grab a cheap O(1) refcount-bump snapshot each
     /// frame instead of paying ~20–40k heap allocations to deep-clone
@@ -284,6 +280,12 @@ pub struct AppState {
     /// heals on the next relaunch. Cleared on app restart — the
     /// user re-applies if they want them remembered.
     pub regional_overrides: HashMap<String, bool>,
+    /// Cached `verdict::recent_launch_args(50)` result. The
+    /// per-row Installed dropdown calls this every paint per row;
+    /// caching takes the disk hit from O(rows*frames) to O(1) per
+    /// session, with an invalidate on every add/forget/clear so
+    /// the dropdown reflects mutations the very next paint.
+    pub launch_args_history_cache: Option<std::sync::Arc<Vec<String>>>,
     /// Snapshot of `regional_filters[uuid].enabled` from the
     /// selected profile's Local State. Refreshed on profile change
     /// and after each edit. Used by the catalog grid to show the
@@ -368,9 +370,6 @@ pub struct AppState {
     pub regional_catalog_entries: std::sync::Arc<Vec<crate::lists::catalog::CatalogEntry>>,
     /// True while the catalog fetch is in flight.
     pub regional_catalog_loading: bool,
-    /// component_ids whose enable/disable action is currently in
-    /// flight. Buttons in the catalog panel show "…" while present.
-    pub list_action_pending: HashSet<String>,
 
     /// brave-core commit-compare panels, keyed by channel ("Release" /
     /// "Beta" / "Nightly" / "?"). Each channel's GOOD↔BAD bracket gets
@@ -432,7 +431,7 @@ impl AppState {
         Self {
             console,
             tab: Tab::Versions,
-            installed: vec![],
+            installed: std::sync::Arc::new(vec![]),
             available: std::sync::Arc::new(vec![]),
             launch_args_buf: HashMap::new(),
             available_fetched_at: None,
@@ -457,6 +456,7 @@ impl AppState {
             session_throwaway_dirs: HashMap::new(),
             brave_running_cache: None,
             regional_overrides: HashMap::new(),
+            launch_args_history_cache: None,
             regional_state_view: HashMap::new(),
             subscription_overrides: HashMap::new(),
             subscriptions_view: Vec::new(),
@@ -487,7 +487,6 @@ impl AppState {
             regional_catalog: None,
             regional_catalog_entries: std::sync::Arc::new(Vec::new()),
             regional_catalog_loading: false,
-            list_action_pending: HashSet::new(),
             compare_loading: HashSet::new(),
             compare_results: HashMap::new(),
             compare_errors:  HashMap::new(),

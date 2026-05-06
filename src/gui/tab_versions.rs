@@ -41,7 +41,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             font_id.size += 3.0;
         }
         if ui.button("Refresh installed").clicked() {
-            state.installed = versions::list_installed().unwrap_or_default();
+            state.installed = std::sync::Arc::new(
+                versions::list_installed().unwrap_or_default());
         }
         let fetching = state.fetching_releases;
         if ui.add_enabled(!fetching, egui::Button::new(
@@ -304,7 +305,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // (`Label::truncate(true)`), and the row is tight enough that
         // Open + Del stay on-row even when the Stop button appears.
         const I_PATH: f32 = 315.0;
-        for v in &installed {
+        for v in installed.iter() {
             ui.horizontal(|ui| {
                 let verdict = verdict::version_verdict(&v.tag).unwrap_or(Verdict::Unknown);
                 let dot_color = verdict_color(verdict);
@@ -566,6 +567,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     // can offer it on other rows. Empty strings are
                     // a no-op inside `add_launch_args_to_history`.
                     let _ = verdict::add_launch_args_to_history(s);
+                    invalidate_launch_args_history(state);
                 }
                 // Dropdown of recent launch-arg strings used on any
                 // row. Click an entry to copy it into THIS row's
@@ -575,7 +577,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 let mut to_forget: Option<String> = None;
                 // Pull more entries than fit visibly so the scroll
                 // gives you real depth — sorted newest-first by SQL.
-                let history = verdict::recent_launch_args(50).unwrap_or_default();
+                // Cache lives on AppState; lazy-loaded once and
+                // refreshed on add/forget/clear so the dropdown
+                // doesn't re-query sqlite every paint per row.
+                let history = launch_args_history(state);
                 ui.menu_button("v", |ui| {
                     if history.is_empty() {
                         ui.label(egui::RichText::new("(no history yet)")
@@ -594,7 +599,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             .auto_shrink([false, true])
                             .show(ui, |ui|
                         {
-                            for h in &history {
+                            for h in history.iter() {
                                 ui.horizontal(|ui| {
                                     if ui.add(egui::Button::new(
                                         egui::RichText::new(h).monospace())
@@ -623,11 +628,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     state.launch_args_buf.insert(v.tag.clone(), s.clone());
                     let _ = verdict::set_launch_args(&v.tag, &s);
                     let _ = verdict::add_launch_args_to_history(&s);
+                    invalidate_launch_args_history(state);
                     crate::console::info(&state.console, "config",
                         format!("applied history args to {}: {s}", v.tag));
                 }
                 if let Some(s) = to_forget {
                     let _ = verdict::forget_launch_args(&s);
+                    invalidate_launch_args_history(state);
                     crate::console::info(&state.console, "config",
                         format!("forgot args from history: {s}"));
                 }
@@ -656,7 +663,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                     format!("dropped per-tag launch args for {tag}: {prior}"));
                             }
                             state.launch_args_buf.remove(&tag);
-                            state.installed = versions::list_installed().unwrap_or_default();
+                            state.installed = std::sync::Arc::new(
+                versions::list_installed().unwrap_or_default());
                             let secs = started.elapsed().as_secs_f64();
                             crate::console::info(&state.console, "uninstall",
                                 format!("uninstalled {tag} in {secs:.1}s"));
@@ -1154,8 +1162,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                 match std::fs::remove_dir_all(&dir) {
                                     Ok(()) => {
                                         uninstall_note = " + uninstalled".to_string();
-                                        state.installed = versions::list_installed()
-                                            .unwrap_or_default();
+                                        state.installed = std::sync::Arc::new(
+                                            versions::list_installed().unwrap_or_default());
                                         crate::console::info(&state.console, "manual",
                                             format!("  • uninstalled {}", dir.display()));
                                     }
@@ -2167,6 +2175,22 @@ fn parse_chromium_version(title: &str) -> Option<String> {
 
 /// Sort installed tags newest-first using semver where parseable; falls
 /// back to lexicographic ordering for any tag that isn't `vMAJOR.MINOR.PATCH`.
+/// Lazy-load the launch-args history into AppState. Returns an
+/// `Arc<Vec<String>>` so the dropdown callback can iterate cheaply
+/// without copying the underlying Vec. Invalidated by
+/// `invalidate_launch_args_history` whenever a mutation happens.
+fn launch_args_history(state: &mut AppState) -> std::sync::Arc<Vec<String>> {
+    if state.launch_args_history_cache.is_none() {
+        let loaded = verdict::recent_launch_args(50).unwrap_or_default();
+        state.launch_args_history_cache = Some(std::sync::Arc::new(loaded));
+    }
+    state.launch_args_history_cache.as_ref().unwrap().clone()
+}
+
+fn invalidate_launch_args_history(state: &mut AppState) {
+    state.launch_args_history_cache = None;
+}
+
 fn sort_tags_newest_first(tags: &mut [String]) {
     tags.sort_by(|a, b| {
         let pa = semver::Version::parse(a.trim_start_matches('v')).ok();
