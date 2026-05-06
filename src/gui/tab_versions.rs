@@ -1467,8 +1467,19 @@ fn render_compare_one(
     ui.group(|ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("[{channel}]")).strong().monospace());
-            ui.colored_label(Color32::from_rgb(220, 180, 60),
-                format!("GOOD {good} ↔ BAD {bad}  (range {older}...{newer})"));
+            // Color-code the bracket endpoints to match the verdict
+            // dots in the rest of the GUI: GOOD = green, BAD = red.
+            // Range + arrow stay neutral so the eye lands on the
+            // tags themselves.
+            let good_c = verdict_color(Verdict::Good);
+            let bad_c  = verdict_color(Verdict::Bad);
+            ui.label(RichText::new("GOOD ").color(good_c).strong());
+            ui.label(RichText::new(good).color(good_c).strong().monospace());
+            ui.label(RichText::new(" <-> ").color(Color32::from_gray(160)));
+            ui.label(RichText::new("BAD ").color(bad_c).strong());
+            ui.label(RichText::new(bad).color(bad_c).strong().monospace());
+            super::app::weak_label(ui,
+                format!("(range {older}...{newer})"));
             let label = if loading        { "Loading…".to_string() }
                 else if has_result        { "Reload".to_string() }
                 else                      { format!("Load {older}...{newer}") };
