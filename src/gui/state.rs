@@ -11,9 +11,27 @@ use crate::versions::install::{DownloadProgress, ProgressSink};
 use crate::versions::InstalledVersion;
 
 /// Cap on how many parallel install tasks the GUI lets the user fire
-/// off. Three is enough to overlap network + extract waits without
-/// thrashing the disk or saturating GitHub's per-connection rate.
-pub const MAX_CONCURRENT_INSTALLS: usize = 3;
+/// Anonymous installs share GitHub's 60-req/hr REST quota with
+/// every other API call brave-regress makes, so we cap concurrent
+/// installs lower in that mode to avoid burning the whole budget
+/// on a single click-storm.
+pub const MAX_CONCURRENT_INSTALLS_ANON: usize  = 4;
+/// Authenticated calls get 5,000/hr — plenty of headroom — so we
+/// allow more parallel installs to actually use it. Bandwidth and
+/// disk extract speed become the bottleneck before the API does.
+pub const MAX_CONCURRENT_INSTALLS_TOKEN: usize = 8;
+
+/// Effective concurrent-install cap for the current state. When a
+/// non-empty GitHub token is configured (Settings or `GITHUB_TOKEN`
+/// env var) we lift the cap because the rate-limit headroom is
+/// there.
+pub fn max_concurrent_installs(github_token: &str) -> usize {
+    let has_explicit = !github_token.trim().is_empty();
+    let has_env      = std::env::var("GITHUB_TOKEN")
+        .map(|v| !v.trim().is_empty()).unwrap_or(false);
+    if has_explicit || has_env { MAX_CONCURRENT_INSTALLS_TOKEN }
+    else                       { MAX_CONCURRENT_INSTALLS_ANON }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tab { Versions, Lists, Console }
@@ -42,8 +60,9 @@ pub type CompareQueue = Arc<Mutex<Vec<(String, Result<crate::versions::github::C
 pub type TagMetaQueue = Arc<Mutex<Vec<(String, Result<(), String>)>>>;
 
 /// Install completion queue: `(tag, Result<install_path, error>)`.
-/// Vec rather than a single slot so up to MAX_CONCURRENT_INSTALLS
-/// parallel installs can complete into the same frame.
+/// Vec rather than a single slot so multiple parallel installs
+/// (cap from `max_concurrent_installs`) can complete into the
+/// same frame.
 pub type InstallQueue = Arc<Mutex<Vec<(String, Result<String, String>)>>>;
 
 /// Async results that arrive from background tokio tasks.
@@ -319,8 +338,8 @@ pub struct AppState {
     /// long the GitHub walk took. Cleared in the drain.
     pub fetching_started: Option<std::time::Instant>,
     /// Tags that have an install task currently in flight. Up to
-    /// `MAX_CONCURRENT_INSTALLS` may run at once; the Install button
-    /// disables itself once that cap is reached.
+    /// `max_concurrent_installs(token)` may run at once; the Install
+    /// button disables itself once that cap is reached.
     pub installing: HashSet<String>,
     /// Per-tag spawn time for the in-flight installs — the completion
     /// drain reads this to format a "in N.Ns" duration in the

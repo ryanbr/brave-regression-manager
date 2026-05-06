@@ -89,7 +89,7 @@ pub async fn install_tag_with_asset(
     tag: &str, asset_name: &str, asset_url: &str, asset_size: u64,
     sink: Option<ProgressSink>,
 ) -> Result<PathBuf> {
-    install_tag_with_asset_console(tag, asset_name, asset_url, asset_size, sink, None).await
+    install_tag_with_asset_console(tag, asset_name, asset_url, asset_size, sink, None, None).await
 }
 
 /// Same as `install_tag_with_asset` but also emits per-phase progress
@@ -99,6 +99,7 @@ pub async fn install_tag_with_asset_console(
     tag: &str, asset_name: &str, asset_url: &str, asset_size: u64,
     sink: Option<ProgressSink>,
     console: Option<crate::console::Handle>,
+    github_token: Option<String>,
 ) -> Result<PathBuf> {
     paths::ensure_dirs()?;
     let dest = paths::version_dir(tag);
@@ -182,7 +183,8 @@ pub async fn install_tag_with_asset_console(
         sink: sink.clone(),
         tag:  tag.to_string(),
     };
-    download(asset_url, &download_path, asset_size, tag, asset_name, sink.clone()).await?;
+    download(asset_url, &download_path, asset_size, tag, asset_name,
+             sink.clone(), github_token.clone()).await?;
 
     if dest.exists() { std::fs::remove_dir_all(&dest)?; }
     std::fs::create_dir_all(&dest)?;
@@ -230,7 +232,8 @@ pub async fn install_tag_with_asset_console(
 }
 
 async fn download(url: &str, dest: &Path, expected_size: u64,
-                  tag: &str, asset_name: &str, sink: Option<ProgressSink>) -> Result<()> {
+                  tag: &str, asset_name: &str, sink: Option<ProgressSink>,
+                  github_token: Option<String>) -> Result<()> {
     if dest.exists() {
         let meta = std::fs::metadata(dest)?;
         if meta.len() == expected_size {
@@ -264,6 +267,7 @@ async fn download(url: &str, dest: &Path, expected_size: u64,
         match download_attempt(
             url, &tmp, resume_from, expected_size,
             tag, asset_name, sink.clone(), stall_timeout, started_at,
+            github_token.clone(),
         ).await {
             Ok(()) => {
                 tokio::fs::rename(&tmp, dest).await?;
@@ -300,6 +304,7 @@ async fn download_attempt(
     url: &str, tmp: &Path, resume_from: u64, expected_size: u64,
     tag: &str, asset_name: &str, sink: Option<ProgressSink>,
     stall_timeout: Duration, started_at: Instant,
+    github_token: Option<String>,
 ) -> Result<()> {
     let client = reqwest::Client::builder()
         .user_agent(BROWSER_UA)
@@ -308,6 +313,17 @@ async fn download_attempt(
         .build()?;
 
     let mut req = client.get(url);
+    // Authenticate the github.com / api.github.com hop so the
+    // redirect call counts against the 5,000/hr token quota
+    // instead of the 60/hr anonymous one. reqwest's default
+    // redirect policy strips Authorization on cross-host
+    // redirects (0.12+), so the token doesn't leak to the
+    // signed-S3 URL we get redirected to.
+    let resolved_token = github_token.filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.trim().is_empty()));
+    if let Some(t) = &resolved_token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
     if resume_from > 0 {
         req = req.header("Range", format!("bytes={resume_from}-"));
     }

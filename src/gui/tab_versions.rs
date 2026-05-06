@@ -1268,6 +1268,7 @@ fn render_status_cell(
     busy: bool,
 ) {
     let installing_now = state.installing.clone();
+    let install_cap = super::state::max_concurrent_installs(&state.github_token);
     ui.horizontal(|ui| {
         match (&r.host_asset, installed, busy) {
                     (_, true, _) => { ui.label("installed"); }
@@ -1301,8 +1302,7 @@ fn render_status_cell(
                         let btn_label = if r.cached { "Install (cached)" } else { "Install" };
                         let arch_mismatch = is_opposite_arch_asset(name);
                         let already_installing = installing_now.contains(&r.tag);
-                        let cap_reached = installing_now.len()
-                            >= super::state::MAX_CONCURRENT_INSTALLS;
+                        let cap_reached = installing_now.len() >= install_cap;
                         let btn_resp = ui.add_enabled(
                             !already_installing && !cap_reached && !arch_mismatch,
                             egui::Button::new(btn_label));
@@ -1313,9 +1313,11 @@ fn render_status_cell(
                                  refresh the cache, then re-install.")
                         } else if cap_reached && !already_installing {
                             btn_resp.on_disabled_hover_text(format!(
-                                "Already installing {} version(s) — wait for one to \
-                                 finish before starting another.",
-                                super::state::MAX_CONCURRENT_INSTALLS))
+                                "Already installing {} version(s) (cap = {}) — \
+                                 wait for one to finish, or set a GitHub token \
+                                 in Settings to lift the cap to {}.",
+                                installing_now.len(), install_cap,
+                                super::state::MAX_CONCURRENT_INSTALLS_TOKEN))
                         } else { btn_resp };
                         if btn_resp.clicked() {
                             state.installing.insert(r.tag.clone());
@@ -1342,11 +1344,17 @@ fn render_status_cell(
                             let url      = r.asset_url.clone();
                             let size     = r.asset_size;
                             let cons     = state.console.clone();
+                            let token    = if state.github_token.trim().is_empty() {
+                                None
+                            } else {
+                                Some(state.github_token.clone())
+                            };
                             state.rt.spawn(async move {
                                 let result = match (url, size) {
                                     (Some(u), Some(s)) =>
                                         versions::install::install_tag_with_asset_console(
-                                            &tag2, &name2, &u, s, Some(progress), Some(cons)).await,
+                                            &tag2, &name2, &u, s, Some(progress),
+                                            Some(cons), token).await,
                                     _ =>
                                         versions::install::install_tag_with_progress(
                                             &tag2, Some(progress)).await,
