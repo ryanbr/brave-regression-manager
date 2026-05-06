@@ -346,7 +346,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     } else {
                         String::new()
                     };
-                    let extra_args = verdict::parse_launch_args(&effective_args);
+                    let mut extra_args = verdict::parse_launch_args(&effective_args);
+                    if state.auto_open_url_enabled
+                        && !state.auto_open_url.trim().is_empty()
+                    {
+                        extra_args.push(state.auto_open_url.trim().to_string());
+                    }
                     // Resolve the user-data-dir source AND log which
                     // precedence tier won — makes it obvious in the
                     // Console why a custom profile did/didn't apply.

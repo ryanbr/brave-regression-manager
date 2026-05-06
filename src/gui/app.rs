@@ -159,6 +159,8 @@ impl App {
         state.freeze_components = cfg.gui.freeze_components;
         state.block_drive_launcher = cfg.gui.block_drive_launcher;
         state.suppress_p3a_banner = cfg.gui.suppress_p3a_banner;
+        state.auto_open_url_enabled = cfg.gui.auto_open_url_enabled;
+        state.auto_open_url = cfg.gui.auto_open_url.clone();
         state.note_window_pos = cfg.gui.note_window_pos
             .map(|[x, y]| egui::pos2(x, y));
         state.theme = cfg.gui.theme.clone();
@@ -238,13 +240,18 @@ impl App {
         console::info(&state.console, "settings", format!(
             "theme={}  channels={}  release_count={}  date={}  \
              log_level={:?}  freeze_components={}  block_drive_launcher={}  \
-             suppress_p3a_banner={}  \
+             suppress_p3a_banner={}  auto_open_url={}  \
              versions_dir={}  default_profile_folder={}  default_args={}  \
              clean_profile_per_launch={}  reuse_clean_profile={}  \
              launch_as_admin={}  github_token={}  settings_location={}",
             state.theme, chans, state.release_count, date_filter,
             state.brave_log_level, state.freeze_components, state.block_drive_launcher,
             state.suppress_p3a_banner,
+            if state.auto_open_url_enabled && !state.auto_open_url.trim().is_empty() {
+                state.auto_open_url.clone()
+            } else {
+                "off".to_string()
+            },
             versions_dir_str, prof_dir, def_args,
             state.clean_profile_per_launch, state.reuse_clean_profile,
             state.launch_as_admin, token_str, state.settings_location));
@@ -314,6 +321,8 @@ impl App {
         cfg.gui.freeze_components = self.state.freeze_components;
         cfg.gui.block_drive_launcher = self.state.block_drive_launcher;
         cfg.gui.suppress_p3a_banner = self.state.suppress_p3a_banner;
+        cfg.gui.auto_open_url_enabled = self.state.auto_open_url_enabled;
+        cfg.gui.auto_open_url         = self.state.auto_open_url.clone();
         cfg.gui.note_window_pos = self.state.note_window_pos
             .map(|p| [p.x, p.y]);
         cfg.gui.theme = self.state.theme.clone();

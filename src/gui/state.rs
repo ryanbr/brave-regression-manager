@@ -284,6 +284,12 @@ pub struct AppState {
     /// = false are written to <user-data-dir>/Local State before
     /// every launch.
     pub suppress_p3a_banner: bool,
+    /// Auto-open URL settings — both mirrored from config.toml.
+    /// When `auto_open_url_enabled` is on AND `auto_open_url` is
+    /// non-empty, the URL is appended as a positional arg to every
+    /// Brave launch so Chromium opens it in a tab at startup.
+    pub auto_open_url_enabled: bool,
+    pub auto_open_url:         String,
     pub theme: String,
     pub channel_release: bool,
     pub channel_beta:    bool,
@@ -488,6 +494,8 @@ impl AppState {
             freeze_components: false,
             block_drive_launcher: true,
             suppress_p3a_banner: true,
+            auto_open_url_enabled: false,
+            auto_open_url: String::new(),
             theme: "dark".into(),
             channel_release: false,
             channel_beta:    false,

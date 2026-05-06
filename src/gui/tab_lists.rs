@@ -138,7 +138,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 } else {
                     String::new()
                 };
-                let extra_args = crate::verdict::parse_launch_args(&effective_args);
+                let mut extra_args = crate::verdict::parse_launch_args(&effective_args);
+                if state.auto_open_url_enabled
+                    && !state.auto_open_url.trim().is_empty()
+                {
+                    extra_args.push(state.auto_open_url.trim().to_string());
+                }
                 // Resolve the user-data-dir AND tell the user which
                 // precedence tier won — same diagnostic line as the
                 // Installed Versions Launch button so reuse / clean-

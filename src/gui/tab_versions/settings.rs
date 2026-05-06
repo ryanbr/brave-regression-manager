@@ -121,6 +121,34 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                 }
                 ui.end_row();
 
+                ui.label("Auto-open URL on launch:");
+                ui.horizontal(|ui| {
+                    let prev_enabled = state.auto_open_url_enabled;
+                    let prev_url     = state.auto_open_url.clone();
+                    ui.checkbox(&mut state.auto_open_url_enabled, "")
+                        .on_hover_text(
+                            "When ON, the URL on the right is appended as a \
+                             positional argument to every Brave launch. \
+                             Chromium opens whatever's not a --flag as a tab \
+                             on startup, so the page loads in the new window.\n\n\
+                             Leave the URL field blank to disable without \
+                             un-ticking.");
+                    let resp = ui.add(egui::TextEdit::singleline(&mut state.auto_open_url)
+                        .desired_width(280.0)
+                        .hint_text("https://example.com/test-page"));
+                    let changed = state.auto_open_url_enabled != prev_enabled
+                               || (resp.lost_focus() && state.auto_open_url != prev_url);
+                    if changed {
+                        state.config_dirty = true;
+                        let on = state.auto_open_url_enabled
+                              && !state.auto_open_url.trim().is_empty();
+                        crate::console::info(&state.console, "config", format!(
+                            "auto_open_url on next launch: {}",
+                            if on { state.auto_open_url.as_str() } else { "off" }));
+                    }
+                });
+                ui.end_row();
+
                 ui.label("Suppress P3A banner:");
                 let mut p3a = state.suppress_p3a_banner;
                 if ui.checkbox(&mut p3a, "").on_hover_text(

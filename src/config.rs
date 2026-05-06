@@ -47,6 +47,13 @@ pub struct Gui {
     /// the banner re-appearing on every fresh throwaway and don't
     /// want the test browser pinging home either.
     #[serde(default = "default_true")] pub suppress_p3a_banner: bool,
+    /// When true, every Brave launch appends `auto_open_url` as a
+    /// positional argument so Chromium opens the URL in a new tab
+    /// at startup. Useful for regression-testing a specific page
+    /// against multiple Brave versions without typing the URL into
+    /// each launch.
+    #[serde(default)] pub auto_open_url_enabled: bool,
+    #[serde(default)] pub auto_open_url:         String,
     /// Saved position of the per-tag Note editor window so a user
     /// who's dragged it doesn't have to re-place it every time
     /// they reopen the app. `[x, y]` in egui screen coords. None
@@ -129,6 +136,8 @@ impl Default for Gui {
             freeze_components: false,
             block_drive_launcher: true,
             suppress_p3a_banner: true,
+            auto_open_url_enabled: false,
+            auto_open_url: String::new(),
             note_window_pos: None,
             theme: "dark".into(),
             channel_release: false,
