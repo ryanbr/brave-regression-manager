@@ -273,12 +273,25 @@ pub fn list_version_verdicts() -> Result<Vec<VersionVerdict>> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-/// Wipe every row from `version_verdict` — used by the GUI's
-/// Clear → Verdicts menu. Returns the count of deleted rows so the
-/// GUI can show a summary in the status bar.
-pub fn clear_all_version_verdicts() -> Result<usize> {
+/// Wipe every row from `version_verdict` whose tag is NOT in the
+/// supplied list. Used by the GUI's Clear → Verdicts menu so the
+/// verdicts attached to currently-installed tags are preserved
+/// (those are the ones the user is actively bisecting); only stale
+/// verdicts for tags they've since uninstalled get dropped. When
+/// `keep_tags` is empty this is equivalent to clearing all rows.
+pub fn clear_uninstalled_version_verdicts(keep_tags: &[String]) -> Result<usize> {
     let conn = open()?;
-    let n = conn.execute("DELETE FROM version_verdict", [])?;
+    if keep_tags.is_empty() {
+        return Ok(conn.execute("DELETE FROM version_verdict", [])?);
+    }
+    // Build a parameterised IN-list — placeholders + boxed params,
+    // so SQLite doesn't have to re-parse the query for each tag.
+    let placeholders = vec!["?"; keep_tags.len()].join(",");
+    let sql = format!(
+        "DELETE FROM version_verdict WHERE tag NOT IN ({placeholders})");
+    let params: Vec<&dyn rusqlite::ToSql> =
+        keep_tags.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let n = conn.execute(&sql, params.as_slice())?;
     Ok(n)
 }
 

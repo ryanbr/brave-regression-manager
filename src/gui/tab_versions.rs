@@ -629,17 +629,25 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui|
         {
             ui.menu_button("Clear v", |ui| {
-                if ui.button("Verdicts")
+                if ui.button("Verdicts (uninstalled only)")
                     .on_hover_text(
-                        "Wipe every per-tag verdict (GOOD / BAD / BUGGY / \
-                         UNSURE / NEW). Notes, launch args, and per-tag \
-                         profile dirs are not affected.")
+                        "Wipe per-tag verdicts (GOOD / BAD / BUGGY / \
+                         UNSURE / NEW) for tags you no longer have \
+                         installed. Verdicts on currently-installed \
+                         tags are preserved — those are the ones \
+                         you're actively bisecting. Notes, launch \
+                         args, and per-tag profile dirs are not \
+                         affected.")
                     .clicked()
                 {
-                    match verdict::clear_all_version_verdicts() {
+                    let keep: Vec<String> = state.installed.iter()
+                        .map(|v| v.tag.clone()).collect();
+                    match verdict::clear_uninstalled_version_verdicts(&keep) {
                         Ok(n) => {
                             crate::console::info(&state.console, "verdict",
-                                format!("cleared {n} verdict row(s)"));
+                                format!("cleared {n} verdict row(s); \
+                                 kept verdicts for {} installed tag(s)",
+                                 keep.len()));
                             state.status_msg = format!("cleared {n} verdict(s)");
                         }
                         Err(e) => {
