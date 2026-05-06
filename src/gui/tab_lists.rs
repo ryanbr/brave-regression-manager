@@ -61,13 +61,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             // reuse is on) — Brave's actually been pulling
             // components into the throwaway.
             let (combined, _targets) = discover_combined_lists(state);
-            state.lists_for_profile = combined;
-            // Refresh the subscriptions + custom_filters panels for
-            // the new profile too — they share the same Local State
-            // file but each profile can carry its own.
-            reload_regional_state(state);
-            reload_subscriptions(state);
-            reload_custom_filters(state);
+            set_lists_for_profile(state, combined);
+            // Single Local State read populates all three filter
+            // views (regional flags, subscriptions, custom_filters).
+            reload_all_filter_views(state);
         }
 
         if ui.button("+ New profile").clicked() {
@@ -228,7 +225,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         }
                     }
                 }
-                state.lists_for_profile = combined;
+                set_lists_for_profile(state, combined);
             } else {
                 crate::console::warn(&state.console, "rescan", "no profile selected");
             }
@@ -618,16 +615,21 @@ fn render_regional_catalog_panel(ui: &mut Ui, state: &mut AppState) {
                 }
             }
 
-            // Snapshot what we need from `state` BEFORE entering the
-            // closures so the row's Enable/Disable buttons (which
-            // need &mut state via spawn_*) don't fight an immutable
-            // borrow on state.regional_catalog.
-            let entries: Vec<crate::lists::catalog::CatalogEntry> = state.regional_catalog
-                .as_ref().map(|c| c.entries.clone()).unwrap_or_default();
+            // O(1) Arc clone instead of a 59-element Vec<CatalogEntry>
+            // realloc per frame. The Arc is refreshed in lockstep
+            // with `regional_catalog`, so render always sees the
+            // current entries without taking a borrow on state for
+            // the whole grid scope (which would conflict with the
+            // &mut state Enable/Disable spawners need).
+            let entries = state.regional_catalog_entries.clone();
             if !entries.is_empty() {
-                let installed_ids: std::collections::HashSet<String> =
-                    state.lists_for_profile.iter()
-                        .map(|l| l.component_id.clone()).collect();
+                // Cached Arc<HashSet> — no per-frame rebuild from
+                // lists_for_profile; refreshed in lockstep with
+                // it via `set_lists_for_profile`. Arc clone here
+                // is one atomic increment, vs the previous
+                // .iter().map().collect() which reallocated every
+                // member string per paint.
+                let installed_ids = state.installed_component_ids.clone();
                 let row_h = ui.spacing().interact_size.y + 2.0;
                 egui::ScrollArea::vertical().id_source("catalog_scroll")
                     .max_height(row_h * 12.0)
@@ -654,7 +656,7 @@ fn render_regional_catalog_panel(ui: &mut Ui, state: &mut AppState) {
                         ui.label(RichText::new("Action").strong());
                         ui.label(RichText::new("Source").strong());
                         ui.end_row();
-                        for e in &entries {
+                        for e in entries.iter() {
                             let on_disk = installed_ids.contains(&e.component_id);
                             let pending = state.list_action_pending.contains(&e.component_id);
                             // Effective state: explicit override > catalog default.
@@ -855,6 +857,15 @@ fn render_custom_filters_panel(ui: &mut Ui, state: &mut AppState, brave_running:
         });
 }
 
+/// Set `lists_for_profile` and refresh the cached
+/// `installed_component_ids` set in one go so the catalog grid's
+/// O(1) "is this on disk" check stays in sync.
+fn set_lists_for_profile(state: &mut AppState, lists: Vec<lists::discover::EnabledList>) {
+    state.installed_component_ids = std::sync::Arc::new(
+        lists.iter().map(|l| l.component_id.clone()).collect());
+    state.lists_for_profile = lists;
+}
+
 /// Walk every dir Brave might be loading lists from for this
 /// session — the source profile plus the active throwaway when
 /// `clean_profile_per_launch` + `reuse_clean_profile` is on — and
@@ -879,10 +890,23 @@ fn discover_combined_lists(state: &AppState) -> (Vec<lists::discover::EnabledLis
     let mut targets: Vec<std::path::PathBuf> = Vec::new();
     if let Some(t) = &throwaway { targets.push(t.clone()); }
     if let Some(s) = &source    { targets.push(s.clone()); }
+    // Build the catalog ONCE from our cached entries (when present)
+    // so per-target enabled_lists doesn't re-parse the on-disk
+    // catalog component file for each dir we walk. Falls back to
+    // the per-target on-disk read inside `enabled_lists_with_catalog`
+    // when we don't have a cached snapshot yet.
+    let prebuilt: Option<lists::catalog::Catalog> = if state.regional_catalog_entries.is_empty() {
+        None
+    } else {
+        Some(state.regional_catalog_entries.iter()
+            .map(|e| (e.uuid.clone(), e.clone()))
+            .collect())
+    };
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for dir in &targets {
-        let lists = lists::discover::enabled_lists(dir).unwrap_or_default();
+        let lists = lists::discover::enabled_lists_with_catalog(dir, prebuilt.as_ref())
+            .unwrap_or_default();
         for l in lists {
             if seen.insert(l.component_id.clone()) { out.push(l); }
         }
@@ -986,7 +1010,7 @@ fn force_redownload(state: &mut AppState, list: &lists::discover::EnabledList) {
     state.status_msg = summary;
     // Refresh the sidebar so the EMPTY row disappears immediately.
     let (combined, _) = discover_combined_lists(state);
-    state.lists_for_profile = combined;
+    set_lists_for_profile(state, combined);
     state.selected_list = None;
 }
 
@@ -1045,7 +1069,7 @@ fn cleanup_empty_lists(state: &mut AppState) {
     }
     state.status_msg = summary;
     let (combined, _) = discover_combined_lists(state);
-    state.lists_for_profile = combined;
+    set_lists_for_profile(state, combined);
     state.selected_list = None;
 }
 
@@ -1054,9 +1078,7 @@ fn refresh_all_views(state: &mut AppState) {
         crate::console::warn(&state.console, "refresh", "no profile selected");
         return;
     }
-    reload_regional_state(state);
-    reload_subscriptions(state);
-    reload_custom_filters(state);
+    reload_all_filter_views(state);
     let (combined, targets) = discover_combined_lists(state);
     let dir_summary: Vec<String> = targets.iter()
         .map(|p| p.display().to_string()).collect();
@@ -1092,8 +1114,34 @@ fn refresh_all_views(state: &mut AppState) {
             dir.display(),
             if dump.is_empty() { "(none)".into() } else { dump }));
     }
-    state.lists_for_profile = combined;
+    set_lists_for_profile(state, combined);
     state.status_msg = "refreshed".into();
+}
+
+/// Single Local State read populating all three filter-list state
+/// views (regional flags, subscriptions, custom filters). The
+/// per-bucket reload_* helpers below are thin wrappers over this
+/// for the callers that mutate just one bucket and want it
+/// re-read in isolation; on profile change / Refresh we use this
+/// directly to avoid three round-trips through the same JSON file.
+fn reload_all_filter_views(state: &mut AppState) {
+    let Some(profile) = state.selected_profile.clone() else { return; };
+    let dir = paths::profile_dir(&profile);
+    match crate::lists::prefs_edit::read_all_views(&dir) {
+        Ok(v) => {
+            crate::console::info(&state.console, "list-edit", format!(
+                "loaded filter views from {}: {} regional, {} subscription(s), \
+                 {} bytes custom_filters",
+                dir.display(), v.regional.len(),
+                v.subscriptions.len(), v.custom.len()));
+            state.regional_state_view     = v.regional;
+            state.subscriptions_view      = v.subscriptions;
+            state.custom_filters_original = v.custom.clone();
+            state.custom_filters_buffer   = v.custom;
+        }
+        Err(e) => crate::console::error(&state.console, "list-edit",
+            format!("read Local State views: {e:#}")),
+    }
 }
 
 fn reload_regional_state(state: &mut AppState) {
@@ -1110,12 +1158,7 @@ fn reload_subscriptions(state: &mut AppState) {
     let Some(profile) = state.selected_profile.clone() else { return; };
     let dir = paths::profile_dir(&profile);
     match crate::lists::prefs_edit::read_subscriptions(&dir) {
-        Ok(v) => {
-            crate::console::info(&state.console, "list-edit",
-                format!("loaded {} subscription(s) from {}",
-                    v.len(), dir.display()));
-            state.subscriptions_view = v;
-        }
+        Ok(v)  => state.subscriptions_view = v,
         Err(e) => crate::console::error(&state.console, "list-edit",
             format!("read subscriptions: {e:#}")),
     }
@@ -1126,9 +1169,6 @@ fn reload_custom_filters(state: &mut AppState) {
     let dir = paths::profile_dir(&profile);
     match crate::lists::prefs_edit::read_custom_filters(&dir) {
         Ok(text) => {
-            crate::console::info(&state.console, "list-edit",
-                format!("loaded custom_filters ({} bytes) from {}",
-                    text.len(), dir.display()));
             state.custom_filters_original = text.clone();
             state.custom_filters_buffer = text;
         }
@@ -1307,53 +1347,45 @@ fn list_edit_targets_for_action(state: &mut AppState) -> Vec<std::path::PathBuf>
 /// Re-write every recorded list override into the user-data-dir
 /// Brave is about to launch with. Called from the Relaunch /
 /// Launch click handlers, AFTER any prior Brave was killed and
-/// BEFORE the new spawn. Idempotent — replaying the same override
-/// twice produces the same Local State. Covers regional_filters,
+/// BEFORE the new spawn. One read → all overrides applied → one
+/// write — atomic, idempotent, covers regional_filters,
 /// list_subscriptions, and custom_filters.
 pub(crate) fn replay_overrides_into(state: &mut AppState, user_data_dir: &std::path::Path) {
-    let regional = &state.regional_overrides;
-    let subs     = &state.subscription_overrides;
-    let custom   = state.custom_filters_override.as_deref();
-    let nothing = regional.is_empty() && subs.is_empty() && custom.is_none();
-    if nothing { return; }
-    let mut total = 0usize;
-    let mut errors: Vec<String> = Vec::new();
-    match crate::lists::prefs_edit::replay_regional_overrides(user_data_dir, regional) {
-        Ok(n)  => total += n,
-        Err(e) => errors.push(format!("regional: {e:#}")),
-    }
-    match crate::lists::prefs_edit::replay_subscription_and_custom(
-        user_data_dir, subs, custom)
+    match crate::lists::prefs_edit::replay_all_overrides(
+        user_data_dir,
+        &state.regional_overrides,
+        &state.subscription_overrides,
+        state.custom_filters_override.as_deref())
     {
-        Ok(n)  => total += n,
-        Err(e) => errors.push(format!("subs/custom: {e:#}")),
-    }
-    if errors.is_empty() {
-        crate::console::info(&state.console, "list-edit",
-            format!("re-applied {total} list override(s) to {} before launch",
-                user_data_dir.display()));
-    } else {
-        crate::console::error(&state.console, "list-edit",
-            format!("override replay to {} partial: {} ok, errors: {}",
-                user_data_dir.display(), total, errors.join(" ; ")));
+        Ok(0) => {} // nothing pending — quiet
+        Ok(n) => crate::console::info(&state.console, "list-edit",
+            format!("re-applied {n} list override(s) to {} before launch",
+                user_data_dir.display())),
+        Err(e) => crate::console::error(&state.console, "list-edit",
+            format!("override replay to {} failed: {e:#}",
+                user_data_dir.display())),
     }
 }
 
 /// Throttled wrapper around `process_guard::brave_running_for_targets`.
 /// At 60fps the per-row catalog grid would otherwise pay a process-list
 /// scan per row; we cache the result for 1s, which is well below human
-/// latency for "did I close Brave yet". Cache keyed on the set of
-/// targets so a profile/throwaway change forces a re-scan.
+/// latency for "did I close Brave yet". Cache keyed on a u64 hash of
+/// the target set so the cache check is alloc-free per frame.
 fn cached_brave_running_for_targets(
     state: &mut AppState,
     targets: &[std::path::PathBuf],
 ) -> bool {
+    use std::hash::{Hash, Hasher};
     const TTL: std::time::Duration = std::time::Duration::from_secs(1);
     let now = std::time::Instant::now();
-    let key: Vec<String> = targets.iter()
-        .map(|p| p.to_string_lossy().into_owned()).collect();
-    if let Some((at, ref cached_key, val)) = state.brave_running_cache {
-        if now.duration_since(at) < TTL && cached_key == &key {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for t in targets {
+        t.hash(&mut hasher);
+    }
+    let key = hasher.finish();
+    if let Some((at, cached_key, val)) = state.brave_running_cache {
+        if now.duration_since(at) < TTL && cached_key == key {
             return val;
         }
     }

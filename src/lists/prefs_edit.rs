@@ -144,38 +144,68 @@ fn sub_pointer_for(url: &str) -> String {
     format!("/brave/ad_block/list_subscriptions/{escaped}/enabled")
 }
 
-/// Read the `regional_filters` dict from Local State, returning a
-/// UUID → enabled map. Only entries with explicit values are
-/// included — UUIDs not in the dict mean "use catalog default", so
-/// the caller falls back to `CatalogEntry.default_enabled` for those.
-pub fn read_regional_filter_states(
-    profile_dir: &Path,
-) -> Result<std::collections::HashMap<String, bool>> {
+/// All three filter-list views from one Local State read — used by
+/// the GUI's "load everything for this profile" path so we don't
+/// open + parse the same JSON three times in a row.
+pub struct AllViews {
+    pub regional:      std::collections::HashMap<String, bool>,
+    pub subscriptions: Vec<Subscription>,
+    pub custom:        String,
+}
+
+/// One read of `<user-data-dir>/Local State`, three views populated.
+pub fn read_all_views(profile_dir: &Path) -> Result<AllViews> {
     let root = read_or_empty(profile_dir)?;
+    Ok(AllViews {
+        regional:      regional_states_from(&root),
+        subscriptions: subscriptions_from(&root),
+        custom:        custom_filters_from(&root),
+    })
+}
+
+fn regional_states_from(root: &Value) -> std::collections::HashMap<String, bool> {
     let mut out = std::collections::HashMap::new();
     let Some(map) = root.pointer("/brave/ad_block/regional_filters")
-        .and_then(|v| v.as_object()) else { return Ok(out); };
+        .and_then(|v| v.as_object()) else { return out; };
     for (uuid, entry) in map {
         if let Some(en) = entry.get("enabled").and_then(|b| b.as_bool()) {
             out.insert(uuid.clone(), en);
         }
     }
-    Ok(out)
+    out
 }
 
-/// Read the `list_subscriptions` dict from Local State, returning a
-/// sorted-by-URL Vec for the GUI. Empty when the dict isn't present.
-pub fn read_subscriptions(profile_dir: &Path) -> Result<Vec<Subscription>> {
-    let root = read_or_empty(profile_dir)?;
+fn subscriptions_from(root: &Value) -> Vec<Subscription> {
     let Some(map) = root.pointer("/brave/ad_block/list_subscriptions")
-        .and_then(|v| v.as_object()) else { return Ok(Vec::new()); };
+        .and_then(|v| v.as_object()) else { return Vec::new(); };
     let mut out: Vec<Subscription> = map.iter().map(|(url, v)| Subscription {
         url:     url.clone(),
         enabled: v.get("enabled").and_then(|b| b.as_bool()).unwrap_or(false),
         title:   v.get("title").and_then(|t| t.as_str()).map(str::to_string),
     }).collect();
     out.sort_by(|a, b| a.url.cmp(&b.url));
-    Ok(out)
+    out
+}
+
+fn custom_filters_from(root: &Value) -> String {
+    root.pointer("/brave/ad_block/custom_filters")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Read the `regional_filters` dict from Local State. Single-view
+/// helper retained for the few call sites that don't need the
+/// other two views.
+pub fn read_regional_filter_states(
+    profile_dir: &Path,
+) -> Result<std::collections::HashMap<String, bool>> {
+    Ok(regional_states_from(&read_or_empty(profile_dir)?))
+}
+
+/// Read the `list_subscriptions` dict. Single-view helper.
+pub fn read_subscriptions(profile_dir: &Path) -> Result<Vec<Subscription>> {
+    Ok(subscriptions_from(&read_or_empty(profile_dir)?))
 }
 
 /// Mutate `list_subscriptions[url].enabled` in-place, creating the
@@ -243,11 +273,7 @@ pub fn remove_subscription(profile_dir: &Path, url: &str) -> Result<Option<PathB
 /// string when absent — the empty case is "no custom rules", which
 /// is also what Brave shows by default.
 pub fn read_custom_filters(profile_dir: &Path) -> Result<String> {
-    let root = read_or_empty(profile_dir)?;
-    Ok(root.pointer("/brave/ad_block/custom_filters")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string())
+    Ok(custom_filters_from(&read_or_empty(profile_dir)?))
 }
 
 /// One-shot: write `brave.ad_block.custom_filters` to the given
@@ -288,45 +314,38 @@ fn set_path(root: &mut Value, dotted: &str, val: Value) -> Result<()> {
     Ok(())
 }
 
-/// Apply every (uuid -> enabled) entry to the given profile dir's
-/// Local State in a single read-modify-write. Used right before
-/// launch to re-assert our edits regardless of what Brave wrote
-/// during its previous shutdown — protects against the freshly-
-/// created throwaway race + Brave shutdown-time pruning.
-///
-/// Returns the count of entries applied (zero when overrides is
-/// empty — caller shouldn't bother logging in that case).
-pub fn replay_regional_overrides(
-    profile_dir: &Path,
-    overrides: &std::collections::HashMap<String, bool>,
-) -> Result<usize> {
-    if overrides.is_empty() { return Ok(0); }
-    let mut root = read_or_empty(profile_dir)?;
-    for (uuid, enabled) in overrides {
-        set_regional_enabled(&mut root, uuid, *enabled)?;
-    }
-    write_atomic(profile_dir, &root)?;
-    Ok(overrides.len())
-}
-
 /// Per-launch action for one subscription URL. `Set(true/false)`
 /// flips `enabled`; `Remove` strips the entry so Brave reverts to
 /// the catalog default.
 #[derive(Debug, Clone)]
 pub enum SubAction { Set(bool), Remove }
 
-/// Replay subscription edits + custom filter rules into Local State
-/// in a single read-modify-write. Symmetric counterpart to
-/// `replay_regional_overrides`. Returns the count of operations
-/// applied (subs + 1 if custom_filters was set).
-pub fn replay_subscription_and_custom(
+/// Single read → all overrides applied → single write. Used right
+/// before launch to re-assert every list edit (regional flags,
+/// subscription ops, custom_filters) the user made this session,
+/// regardless of what Brave wrote during its previous shutdown.
+/// Halves the disk round-trips vs the prior split-by-bucket impl
+/// and makes the operation atomic — no half-applied state if the
+/// custom_filters write blew up after subscriptions had already
+/// been written.
+///
+/// Returns the count of changes applied. Zero when nothing's
+/// pending (caller skips logging).
+pub fn replay_all_overrides(
     profile_dir: &Path,
+    regional: &std::collections::HashMap<String, bool>,
     subscription_ops: &std::collections::HashMap<String, SubAction>,
     custom_filters: Option<&str>,
 ) -> Result<usize> {
-    if subscription_ops.is_empty() && custom_filters.is_none() { return Ok(0); }
+    if regional.is_empty() && subscription_ops.is_empty() && custom_filters.is_none() {
+        return Ok(0);
+    }
     let mut root = read_or_empty(profile_dir)?;
     let mut applied = 0usize;
+    for (uuid, en) in regional {
+        set_regional_enabled(&mut root, uuid, *en)?;
+        applied += 1;
+    }
     for (url, action) in subscription_ops {
         match action {
             SubAction::Set(en) => set_subscription_enabled(&mut root, url, *en)?,

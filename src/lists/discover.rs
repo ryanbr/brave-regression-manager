@@ -44,6 +44,17 @@ const REGIONAL_CATALOG_IDS:  &[&str] = &[
 ///      hard-code (Brave occasionally rebrands them) and components added
 ///      since we last updated the static IDs.
 pub fn enabled_lists(profile_dir: &Path) -> Result<Vec<EnabledList>> {
+    enabled_lists_with_catalog(profile_dir, None)
+}
+
+/// Same as `enabled_lists`, but accepts an optional pre-loaded catalog
+/// so callers walking multiple target dirs (e.g. source + throwaway)
+/// don't re-read + re-parse the catalog component once per dir. When
+/// `prebuilt_catalog` is None, falls back to reading from disk.
+pub fn enabled_lists_with_catalog(
+    profile_dir: &Path,
+    prebuilt_catalog: Option<&super::catalog::Catalog>,
+) -> Result<Vec<EnabledList>> {
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -56,12 +67,23 @@ pub fn enabled_lists(profile_dir: &Path) -> Result<Vec<EnabledList>> {
         }
     }
 
-    // Catalog-driven regional lists.
+    // Catalog-driven regional lists. Prefer the caller-supplied
+    // catalog; only re-read from disk when none was provided. The
+    // on-disk fallback also has to walk the catalog component dir
+    // (read_dir + parse) per call — sharing across targets saves
+    // a JSON parse of the ~50-entry catalog file each time.
     let enabled_uuids = read_enabled_regional_uuids(profile_dir).unwrap_or_default();
-    let catalog = REGIONAL_CATALOG_IDS.iter()
-        .find_map(|cid| active_component_path(profile_dir, cid))
-        .map(|p| super::catalog::load(&p).unwrap_or_default())
-        .unwrap_or_default();
+    let on_disk_catalog;
+    let catalog: &super::catalog::Catalog = match prebuilt_catalog {
+        Some(c) => c,
+        None => {
+            on_disk_catalog = REGIONAL_CATALOG_IDS.iter()
+                .find_map(|cid| active_component_path(profile_dir, cid))
+                .map(|p| super::catalog::load(&p).unwrap_or_default())
+                .unwrap_or_default();
+            &on_disk_catalog
+        }
+    };
     for uuid in enabled_uuids {
         let entry = catalog.get(&uuid);
         let component_id = entry.map(|e| e.component_id.clone()).unwrap_or_default();

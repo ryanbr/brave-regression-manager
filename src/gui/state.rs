@@ -264,11 +264,13 @@ pub struct AppState {
     /// here and reused for every subsequent relaunch of that tag.
     /// Cleared on app restart so new sessions always start fresh.
     pub session_throwaway_dirs: HashMap<String, std::path::PathBuf>,
-    /// Cached `(sample_time, target_set, conflict_present)` from the
-    /// panel render path so we don't pay a process-list scan per
-    /// frame at 60fps. The target_set keys the cache so changing
-    /// profile or throwaway forces a re-scan.
-    pub brave_running_cache: Option<(std::time::Instant, Vec<String>, bool)>,
+    /// Cached `(sample_time, target_hash, conflict_present)` from
+    /// the panel render path so we don't pay a process-list scan
+    /// per frame at 60fps. `target_hash` is a u64 digest of the
+    /// target set, so cache validity check is alloc-free per frame
+    /// (vs the prior Vec<String> key which built fresh strings
+    /// every paint).
+    pub brave_running_cache: Option<(std::time::Instant, u64, bool)>,
     /// In-memory record of every list edit the user has made this
     /// session: catalog UUID → enabled. Re-applied to whichever
     /// user-data-dir Brave is about to launch with, so a Brave
@@ -338,6 +340,13 @@ pub struct AppState {
     pub profiles: Vec<String>,
     pub selected_profile: Option<String>,
     pub lists_for_profile: Vec<EnabledList>,
+    /// Cached HashSet of `lists_for_profile[*].component_id` so the
+    /// catalog grid's "On disk" lookup is O(1) per row without
+    /// rebuilding the set on every paint. `Arc` so render can take
+    /// an O(1) clone without contending for an immutable borrow on
+    /// `state` (which would block the &mut state spawners). Refreshed
+    /// in lockstep with `lists_for_profile`.
+    pub installed_component_ids: std::sync::Arc<std::collections::HashSet<String>>,
     pub selected_list: Option<usize>,
     pub seeding: bool,
     pub applying: bool,
@@ -346,6 +355,12 @@ pub struct AppState {
     /// on-disk cache at startup or from a fresh fetch. `None` when
     /// nothing has loaded yet.
     pub regional_catalog: Option<crate::lists::catalog::CatalogCache>,
+    /// Render-path snapshot of `regional_catalog.entries` wrapped in
+    /// an `Arc` so the catalog grid can take an O(1) clone every
+    /// frame (vs the previous `Vec<CatalogEntry>::clone` which
+    /// reallocated 59 entries' worth of strings every paint). Kept
+    /// in lockstep with `regional_catalog` — refresh both together.
+    pub regional_catalog_entries: std::sync::Arc<Vec<crate::lists::catalog::CatalogEntry>>,
     /// True while the catalog fetch is in flight.
     pub regional_catalog_loading: bool,
     /// component_ids whose enable/disable action is currently in
@@ -459,10 +474,12 @@ impl AppState {
             profiles: vec![],
             selected_profile: None,
             lists_for_profile: vec![],
+            installed_component_ids: std::sync::Arc::new(std::collections::HashSet::new()),
             selected_list: None,
             seeding: false,
             applying: false,
             regional_catalog: None,
+            regional_catalog_entries: std::sync::Arc::new(Vec::new()),
             regional_catalog_loading: false,
             list_action_pending: HashSet::new(),
             compare_loading: HashSet::new(),

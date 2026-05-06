@@ -196,6 +196,9 @@ impl App {
         // Adblock Lists tab's catalog panel.
         state.regional_catalog =
             crate::lists::catalog::CatalogCache::load_from_disk();
+        if let Some(c) = &state.regional_catalog {
+            state.regional_catalog_entries = std::sync::Arc::new(c.entries.clone());
+        }
 
         // Single-line settings summary at startup — confirms what got
         // loaded so the user can sanity-check the persisted config.
@@ -579,6 +582,8 @@ impl App {
                     console::info(&self.state.console, "catalog",
                         format!("fetched regional catalog: {n} list(s) from {}",
                             cache.source_url));
+                    self.state.regional_catalog_entries =
+                        std::sync::Arc::new(cache.entries.clone());
                     self.state.regional_catalog = Some(cache);
                 }
                 Err(e) => {
