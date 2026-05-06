@@ -17,13 +17,16 @@ use super::{min_allowed_date, spawn_fetch, remove_cached_downloads};
 use super::RELEASE_COUNT_OPTIONS;
 
 pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix: &str) {
-    egui::CollapsingHeader::new("Settings")
-        .id_source(format!("settings_panel_{id_suffix}"))
-        .default_open(false)
-        .show(ui, |ui| {
-            egui::Grid::new(format!("settings_grid_{id_suffix}")).num_columns(2)
-                .spacing([12.0, 6.0]).show(ui, |ui|
-            {
+    // The outer CollapsingHeader was useful when this panel sat
+    // inline at the top of the Versions / Lists tabs (didn't want
+    // it to dominate the screen by default). Now that the panel
+    // owns its own dedicated tab, the header was just an extra
+    // click between the user and the content — content opens
+    // immediately. The grid id is kept stable so egui memory
+    // (column widths, etc.) survives the header's removal.
+    egui::Grid::new(format!("settings_grid_{id_suffix}")).num_columns(2)
+        .spacing([12.0, 6.0]).show(ui, |ui|
+    {
                 ui.label("Releases to fetch:");
                 let mut new_count = state.release_count;
                 egui::ComboBox::from_id_source("release_count")
@@ -544,8 +547,7 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                     }
                 });
                 ui.end_row();
-            });
-            app::weak_label(ui, format!("Date range minimum: {} (Brave Nightly history starts here)",
-                            min_allowed_date()));
-        });
+    });
+    app::weak_label(ui, format!("Date range minimum: {} (Brave Nightly history starts here)",
+                    min_allowed_date()));
 }

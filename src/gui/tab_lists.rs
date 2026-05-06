@@ -11,12 +11,8 @@ use super::state::AppState;
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.heading("Adblock Lists");
 
-    // Settings panel mirror — same widgets as the one in Brave Versions.
-    // Visibility is driven by `state.settings_location` so the user can
-    // pick where they want it (versions / lists / both).
-    if matches!(state.settings_location.as_str(), "lists" | "both") {
-        super::tab_versions::render_settings_panel(ui, state, "lists");
-    }
+    // Settings panel moved to the top-bar Settings popup —
+    // see `App::render_settings_window`.
 
     ui.horizontal(|ui| {
         ui.label("Brave version:");

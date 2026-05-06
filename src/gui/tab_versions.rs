@@ -196,11 +196,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         }
     });
 
-    // ── Settings (collapsible) — visibility per
-    // state.settings_location: "versions" / "lists" / "both".
-    if matches!(state.settings_location.as_str(), "versions" | "both") {
-        render_settings_panel(ui, state, "versions");
-    }
+    // ── Settings panel moved to the top-bar Settings popup; the
+    // in-tab placement is no longer rendered. `settings_location`
+    // config key kept for backwards-compat but is now unused.
 
     ui.separator();
 

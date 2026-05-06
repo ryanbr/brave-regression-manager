@@ -34,7 +34,7 @@ pub fn max_concurrent_installs(github_token: &str) -> usize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Tab { Versions, Lists, Console }
+pub enum Tab { Versions, Lists, Settings, Console }
 
 /// Which column is driving the Available-list sort order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

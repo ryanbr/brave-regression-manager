@@ -33,6 +33,33 @@ pub fn apply_theme(ctx: &Context, theme: &str) {
 /// against the window fill, which on the light theme produces a near-
 /// invisible pale-grey on white. This helper uses a darker grey in light
 /// mode (legible on white) while preserving the default fade in dark mode.
+/// Body of the new dedicated Settings tab. Wraps the existing
+/// `render_settings_panel` (formerly rendered inline at the top of
+/// the Versions / Lists tabs) with two presentation tweaks:
+///   - `+2pt` font scaling across every TextStyle in this scope,
+///     so the dense settings grid reads clearly without changing
+///     font sizes elsewhere in the app.
+///   - A scrollable area so the panel fits whatever window height
+///     the user has picked.
+fn render_settings_tab(ui: &mut egui::Ui, state: &mut super::state::AppState) {
+    // Heading first, OUTSIDE the +2 scope, so its size matches
+    // ui.heading("Brave Versions") / ui.heading("Adblock Lists")
+    // exactly. Inside the scope below, every other TextStyle gets
+    // bumped +2pt so the dense settings grid is comfortable to
+    // read.
+    ui.heading("Settings");
+    egui::ScrollArea::vertical()
+        .id_source("settings_tab_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui|
+    {
+        for (_, font) in ui.style_mut().text_styles.iter_mut() {
+            font.size += 2.0;
+        }
+        super::tab_versions::render_settings_panel(ui, state, "tab");
+    });
+}
+
 pub fn weak_label(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
     let visuals = &ui.ctx().style().visuals;
     let color = if visuals.dark_mode {
@@ -707,6 +734,7 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.state.tab, Tab::Versions, "Brave Versions");
                 ui.selectable_value(&mut self.state.tab, Tab::Lists,    "Adblock Lists");
+                ui.selectable_value(&mut self.state.tab, Tab::Settings, "Settings");
                 let console_count = self.state.console.lock().map(|g| g.len()).unwrap_or(0);
                 let console_label = if console_count == 0 { "Console".to_string() }
                                     else { format!("Console ({console_count})") };
@@ -735,6 +763,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| match self.state.tab {
             Tab::Versions => tab_versions::ui(ui, &mut self.state),
             Tab::Lists    => tab_lists::ui(ui, &mut self.state),
+            Tab::Settings => render_settings_tab(ui, &mut self.state),
             Tab::Console  => console_panel::ui(ui, &mut self.state),
         });
     }
