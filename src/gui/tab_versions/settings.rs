@@ -127,9 +127,10 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                 ui.label("Preferred external editor:")
                     .on_hover_text(
                         "Path to your text editor. The list editor's \
-                         'Open externally' button (shown above 500 KiB) \
-                         hands the on-disk list.txt to this program. \
-                         Empty falls back to the OS default handler.");
+                         'Open in External editor' button (always shown \
+                         in the bottom action row) hands the on-disk \
+                         list.txt to this program. Empty falls back to \
+                         the OS default handler.");
                 ui.horizontal(|ui| {
                     let prev = state.preferred_external_editor.clone();
                     let resp = ui.add(egui::TextEdit::singleline(

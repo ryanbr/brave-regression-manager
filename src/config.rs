@@ -55,13 +55,13 @@ pub struct Gui {
     #[serde(default)] pub auto_open_url_enabled: bool,
     #[serde(default)] pub auto_open_url:         String,
     /// Path to the user's preferred external text editor. The
-    /// list editor's "Open externally" button (shown for list.txt
-    /// files over 500 KiB) hands the file to this program when
-    /// set. Empty (default) falls back to the OS default handler:
-    /// `cmd /c start` on Windows, `open` on macOS, `xdg-open` on
-    /// Linux. Single-executable paths only; we don't parse shell
-    /// argv (use Browse to avoid quoting issues with paths
-    /// containing spaces).
+    /// list editor's "Open in External editor" button (always
+    /// shown in the bottom action row) hands the file to this
+    /// program when set. Empty (default) falls back to the OS
+    /// default handler: `cmd /c start` on Windows, `open` on
+    /// macOS, `xdg-open` on Linux. Single-executable paths only;
+    /// we don't parse shell argv (use Browse to avoid quoting
+    /// issues with paths containing spaces).
     #[serde(default)] pub preferred_external_editor: String,
     /// Saved position of the per-tag Note editor window so a user
     /// who's dragged it doesn't have to re-place it every time
