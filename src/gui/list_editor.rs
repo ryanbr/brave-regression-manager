@@ -603,9 +603,14 @@ fn maybe_snapshot(st: &mut Buffer) {
             return;
         }
     }
-    st.undo_stack.push(st.last_snapshot.clone());
+    // mem::replace: move the existing last_snapshot into the
+    // undo stack (no clone), then build the new last_snapshot
+    // by cloning st.text once. Saves one full-buffer clone per
+    // debounced commit — for a 5MB buffer that's ~5MB less alloc
+    // every time the debounce fires.
+    let prev_snapshot = std::mem::replace(&mut st.last_snapshot, st.text.clone());
+    st.undo_stack.push(prev_snapshot);
     trim_undo(&mut st.undo_stack);
-    st.last_snapshot = st.text.clone();
     st.last_snapshot_at = Some(now);
     st.redo_stack.clear();
     // Any edit invalidates the find-highlight char offsets — clear it.
@@ -939,7 +944,15 @@ fn render_diff_window(ctx: &egui::Context, st: &mut Buffer, list: &EnabledList) 
                 }
             });
         });
-    if !open { st.show_diff = false; }
+    if !open {
+        st.show_diff = false;
+        // Free the cached unified diff. For a heavily-edited 5MB
+        // buffer this string can run into MBs and there's no
+        // reason to pin it once the popup's gone — the next
+        // Show diff click recomputes lazily.
+        st.diff_content.clear();
+        st.diff_content.shrink_to_fit();
+    }
 }
 
 fn backup_path(p: &Path) -> PathBuf {
