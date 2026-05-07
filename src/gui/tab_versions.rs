@@ -40,14 +40,32 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
             font_id.size += 3.0;
         }
-        if ui.button("Refresh installed").clicked() {
+        if ui.button("Refresh installed")
+            .on_hover_text(
+                "Re-walk <data-root>/versions/ on disk and rebuild the \
+                 Installed list. Cheap. Use after manually adding/removing \
+                 a version folder outside the GUI, or to sanity-check \
+                 what's actually present.")
+            .clicked()
+        {
             state.installed = std::sync::Arc::new(
                 versions::list_installed().unwrap_or_default());
         }
         let fetching = state.fetching_releases;
         if ui.add_enabled(!fetching, egui::Button::new(
             if fetching { "Fetching…" } else { "Fetch GitHub releases" }
-        )).clicked() {
+        )).on_hover_text(
+            "Page through brave/brave-browser releases on GitHub and \
+             populate the Available list. Honours Settings → Releases to \
+             fetch (auto-bumped to 600 when a date filter is active so \
+             the walk reaches into history).\n\n\
+             With the incremental cache (always on), the walk stops at \
+             the first tag already in the sqlite release_cache table — \
+             so re-fetching after a previous successful pass is fast \
+             and cheap on quota.\n\n\
+             Anonymous: 60 GitHub API calls/hour shared across the app. \
+             Set a token in Settings → GitHub token to lift to 5000/hr.")
+        .clicked() {
             spawn_fetch(state);
         }
         ui.separator();
@@ -851,10 +869,23 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
             font_id.size += 1.0;
         }
-        super::app::weak_label(ui, "Add release by tag:");
+        super::app::weak_label(ui, "Add release by tag:")
+            .on_hover_text(
+                "Skip the page-walk: fetch one specific tag from GitHub \
+                 in a single API call. Useful when you want a tag the \
+                 normal Fetch missed (older than the count window, on a \
+                 channel you've filtered out, etc). Manually-added tags \
+                 are exempt from channel + date filters and float to the \
+                 top of the Available list with a cyan Tag column for \
+                 visual distinction.");
         ui.add(egui::TextEdit::singleline(&mut state.add_by_tag_buf)
             .desired_width(140.0)
-            .hint_text("v1.85.99"));
+            .hint_text("vX.Y.Z"))
+            .on_hover_text(
+                "Brave tag in the form vMAJOR.MINOR.PATCH. The leading 'v' \
+                 is added if you forget it. Capital V is normalised too. \
+                 Any tag GitHub knows about works — see brave/brave-browser \
+                 releases for the canonical list.");
         let raw = state.add_by_tag_buf.trim().to_string();
         let can_add = !raw.is_empty() && !state.adding_by_tag;
         let label = if state.adding_by_tag { "Adding…" } else { "Add" };
@@ -1478,7 +1509,17 @@ fn render_compare_section(
 
     let cmp_heading_size = egui::TextStyle::Body.resolve(ui.style()).size + 2.0;
     ui.label(RichText::new("Commits in bracket (brave-core)")
-        .strong().size(cmp_heading_size));
+        .strong().size(cmp_heading_size))
+        .on_hover_text(
+            "Per-channel GOOD↔BAD bracket panels. brave-regress finds the \
+             closest pair of installed tags marked GOOD and BAD within the \
+             same channel and offers to enumerate the brave-core commits \
+             between them. Click Load to fetch via GitHub's compare API \
+             (one call, capped at 250 commits returned). Open on GitHub \
+             gives the full ranged list including >250.\n\n\
+             Brave-side commits only — Chromium's pinned-version delta is \
+             not part of this view (use the manual Chromium tags row \
+             below the bracket header for that).");
 
     if brackets.is_empty() {
         super::app::weak_label(ui,
@@ -1555,7 +1596,24 @@ fn render_compare_one(
             let label = if loading        { "Loading…".to_string() }
                 else if has_result        { "Reload".to_string() }
                 else                      { format!("Load {older}...{newer}") };
-            if ui.add_enabled(!loading, egui::Button::new(label)).clicked() {
+            let hover = if has_result {
+                format!("Re-fetch the brave-core compare for {older}...{newer} \
+                         from GitHub. The cached result is replaced; folding \
+                         the panel is zero-cost (no re-fetch).")
+            } else {
+                format!(
+                    "Fetch brave-core commits between {older} and {newer} via \
+                     GitHub's repos/.../compare API. One API call. Capped at \
+                     250 commits returned by GitHub — see Open on GitHub for \
+                     the full list when truncated.\n\n\
+                     Anonymous: 60 GitHub API calls/hour shared across the \
+                     app. Set a token in Settings → GitHub token to lift to \
+                     5000/hr.")
+            };
+            if ui.add_enabled(!loading, egui::Button::new(label))
+                .on_hover_text(hover)
+                .clicked()
+            {
                 spawn_compare(state, channel.to_string(),
                               older.to_string(), newer.to_string());
             }

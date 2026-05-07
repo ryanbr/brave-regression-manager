@@ -27,7 +27,17 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
     egui::Grid::new(format!("settings_grid_{id_suffix}")).num_columns(2)
         .spacing([12.0, 6.0]).show(ui, |ui|
     {
-                ui.label("Releases to fetch:");
+                ui.label("Releases to fetch:")
+                    .on_hover_text(
+                        "How many recent GitHub releases to walk when refreshing \
+                         the Available list. Higher = more history visible / more \
+                         pages walked / more API quota burned. Lower = faster \
+                         fetch but you may miss older tags.\n\n\
+                         When a date filter is active, brave-regress automatically \
+                         bumps the effective count to at least 600 so the walk \
+                         reaches into history; this setting is the floor.\n\n\
+                         Changing the value re-fetches immediately (when not \
+                         already in flight).");
                 let mut new_count = state.release_count;
                 egui::ComboBox::from_id_source("release_count")
                     .width(80.0)
@@ -68,7 +78,19 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                 }
                 ui.end_row();
 
-                ui.label("Brave logging:");
+                ui.label("Brave logging:")
+                    .on_hover_text(
+                        "Verbosity passed to Brave on launch:\n\
+                         - Quiet: no extra args, Brave's default minimal output\n\
+                         - Normal: --enable-logging=stderr (writes to Console)\n\
+                         - Verbose: --enable-logging=stderr --v=1 (one extra \
+                         level of detail)\n\
+                         - Debug: --enable-logging=stderr --v=3 (everything, \
+                         very chatty)\n\n\
+                         Higher levels surface adblock-engine / network-stack \
+                         lines in this app's Console panel under the \
+                         [brave/<tag>] source. Useful for diagnosing why a \
+                         site renders differently across versions.");
                 let mut new_lvl = state.brave_log_level;
                 egui::ComboBox::from_id_source("brave_log_level")
                     .selected_text(state.brave_log_level.label())
