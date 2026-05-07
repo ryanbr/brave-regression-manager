@@ -290,6 +290,9 @@ pub struct AppState {
     /// Brave launch so Chromium opens it in a tab at startup.
     pub auto_open_url_enabled: bool,
     pub auto_open_url:         String,
+    /// Mirror of `cfg.gui.preferred_external_editor`. Empty falls
+    /// back to OS default handler.
+    pub preferred_external_editor: String,
     pub theme: String,
     pub channel_release: bool,
     pub channel_beta:    bool,
@@ -496,6 +499,7 @@ impl AppState {
             suppress_p3a_banner: true,
             auto_open_url_enabled: false,
             auto_open_url: String::new(),
+            preferred_external_editor: String::new(),
             theme: "dark".into(),
             channel_release: false,
             channel_beta:    false,

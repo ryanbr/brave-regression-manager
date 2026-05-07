@@ -54,6 +54,15 @@ pub struct Gui {
     /// each launch.
     #[serde(default)] pub auto_open_url_enabled: bool,
     #[serde(default)] pub auto_open_url:         String,
+    /// Path to the user's preferred external text editor. The
+    /// list editor's "Open externally" button (shown for list.txt
+    /// files over 500 KiB) hands the file to this program when
+    /// set. Empty (default) falls back to the OS default handler:
+    /// `cmd /c start` on Windows, `open` on macOS, `xdg-open` on
+    /// Linux. Single-executable paths only; we don't parse shell
+    /// argv (use Browse to avoid quoting issues with paths
+    /// containing spaces).
+    #[serde(default)] pub preferred_external_editor: String,
     /// Saved position of the per-tag Note editor window so a user
     /// who's dragged it doesn't have to re-place it every time
     /// they reopen the app. `[x, y]` in egui screen coords. None
@@ -138,6 +147,7 @@ impl Default for Gui {
             suppress_p3a_banner: true,
             auto_open_url_enabled: false,
             auto_open_url: String::new(),
+            preferred_external_editor: String::new(),
             note_window_pos: None,
             theme: "dark".into(),
             channel_release: false,

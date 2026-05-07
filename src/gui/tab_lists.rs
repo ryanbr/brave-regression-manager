@@ -427,6 +427,27 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             crate::console::info(&state.console, "list",
                                 format!("save result: {}", state.status_msg));
                         }
+                        ui.separator();
+                        // Always-available external-editor handoff —
+                        // useful at any size, mandatory at multi-MB
+                        // where egui's per-paint galley re-layout
+                        // makes typing in-app unbearable.
+                        if ui.button("Open in External editor")
+                            .on_hover_text(
+                                "Hand the on-disk list.txt to the editor in \
+                                 Settings → Preferred external editor (or \
+                                 the OS default when unset). Save there + \
+                                 Re-scan picks up your edits.")
+                            .clicked()
+                        {
+                            crate::console::info(&state.console, "edit",
+                                format!("opening externally: {}", list.path.display()));
+                            super::list_editor::open_external(
+                                &list.path,
+                                &state.console,
+                                &state.preferred_external_editor);
+                        }
+                        ui.separator();
                         if ui.button("Restore original").clicked() {
                             crate::console::info(&state.console, "list",
                                 format!("restoring '{}' from -org backup ({} )",
@@ -485,7 +506,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 // Editor fills the remaining space above the action panel.
-                ListEditorState::ensure_for(&list, ui, &state.console);
+                ListEditorState::ensure_for(&list, ui, &state.console,
+                    &state.preferred_external_editor);
             }
         } else {
             ui.label("Select a list on the left to edit.");

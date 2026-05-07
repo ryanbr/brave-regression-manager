@@ -124,6 +124,57 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                 }
                 ui.end_row();
 
+                ui.label("Preferred external editor:")
+                    .on_hover_text(
+                        "Path to your text editor. The list editor's \
+                         'Open externally' button (shown above 500 KiB) \
+                         hands the on-disk list.txt to this program. \
+                         Empty falls back to the OS default handler.");
+                ui.horizontal(|ui| {
+                    let prev = state.preferred_external_editor.clone();
+                    let resp = ui.add(egui::TextEdit::singleline(
+                        &mut state.preferred_external_editor)
+                        .desired_width(280.0)
+                        .hint_text("e.g. C:\\Program Files\\Notepad++\\notepad++.exe"));
+                    if ui.button("Browse…").on_hover_text(
+                        "Pick the editor's executable. Avoids \
+                         shell-quoting issues with paths containing spaces.")
+                        .clicked()
+                    {
+                        if let Some(picked) = rfd::FileDialog::new()
+                            .set_title("Pick text editor executable")
+                            .pick_file()
+                        {
+                            state.preferred_external_editor = picked.display().to_string();
+                        }
+                    }
+                    if !state.preferred_external_editor.is_empty()
+                        && ui.small_button("x")
+                            .on_hover_text("Clear (use OS default)")
+                            .clicked()
+                    {
+                        state.preferred_external_editor.clear();
+                    }
+                    // Persist on Browse / clear (value diverges
+                    // immediately) OR on textfield edit (only when
+                    // focus is lost so we don't write per keystroke).
+                    let textfield_change = resp.lost_focus()
+                        && state.preferred_external_editor != prev;
+                    let other_change = !resp.has_focus()
+                        && state.preferred_external_editor != prev;
+                    if textfield_change || other_change {
+                        state.config_dirty = true;
+                        crate::console::info(&state.console, "config", format!(
+                            "preferred_external_editor: {}",
+                            if state.preferred_external_editor.is_empty() {
+                                "(OS default)".into()
+                            } else {
+                                state.preferred_external_editor.clone()
+                            }));
+                    }
+                });
+                ui.end_row();
+
                 ui.label("Auto-open URL on launch:");
                 ui.horizontal(|ui| {
                     let prev_enabled = state.auto_open_url_enabled;

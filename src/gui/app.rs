@@ -188,6 +188,7 @@ impl App {
         state.suppress_p3a_banner = cfg.gui.suppress_p3a_banner;
         state.auto_open_url_enabled = cfg.gui.auto_open_url_enabled;
         state.auto_open_url = cfg.gui.auto_open_url.clone();
+        state.preferred_external_editor = cfg.gui.preferred_external_editor.clone();
         state.note_window_pos = cfg.gui.note_window_pos
             .map(|[x, y]| egui::pos2(x, y));
         state.theme = cfg.gui.theme.clone();
@@ -350,6 +351,7 @@ impl App {
         cfg.gui.suppress_p3a_banner = self.state.suppress_p3a_banner;
         cfg.gui.auto_open_url_enabled = self.state.auto_open_url_enabled;
         cfg.gui.auto_open_url         = self.state.auto_open_url.clone();
+        cfg.gui.preferred_external_editor = self.state.preferred_external_editor.clone();
         cfg.gui.note_window_pos = self.state.note_window_pos
             .map(|p| [p.x, p.y]);
         cfg.gui.theme = self.state.theme.clone();

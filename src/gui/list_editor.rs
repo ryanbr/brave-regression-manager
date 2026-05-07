@@ -78,7 +78,12 @@ const UNDO_BYTES_LIMIT: usize = 64 * 1024 * 1024;
 pub struct ListEditorState;
 
 impl ListEditorState {
-    pub fn ensure_for(list: &EnabledList, ui: &mut Ui, console: &crate::console::Handle) {
+    pub fn ensure_for(
+        list: &EnabledList,
+        ui: &mut Ui,
+        console: &crate::console::Handle,
+        preferred_external_editor: &str,
+    ) {
         let editor_id = egui::Id::new(("list_editor", &list.path));
 
         EDITORS.with(|e| {
@@ -188,38 +193,17 @@ impl ListEditorState {
                 }
             });
 
-            // Large-file escape hatch. egui's TextEdit re-lays out
-            // the full buffer on every paint — that cost is
-            // unavoidable inside this widget and dominates editing
-            // latency on multi-MB filter lists. Past a threshold
-            // we surface a one-click "Open externally" button that
-            // hands the file to the OS default editor (Notepad on
-            // Windows, TextEdit on macOS, $VISUAL/$EDITOR via xdg-open
-            // on Linux). Save here in brave-regress will pick up the
-            // external edits on the next Re-scan.
-            const LARGE_FILE_BYTES: usize = 500_000;
-            if st.text.len() > LARGE_FILE_BYTES {
-                ui.horizontal(|ui| {
-                    let mb = st.text.len() as f64 / 1_048_576.0;
-                    ui.colored_label(egui::Color32::from_rgb(220, 180, 60),
-                        format!("Large file ({mb:.1} MiB) — egui re-layouts the \
-                                 full buffer per paint; typing may lag."));
-                    if ui.button("Open externally")
-                        .on_hover_text(
-                            "Hand the on-disk list.txt to the OS default editor \
-                             so you can edit it in something built for big \
-                             files. Save here in brave-regress, then click \
-                             Re-scan in the Lists tab to pick up your changes \
-                             from disk.")
-                        .clicked()
-                    {
-                        let path = list.path.clone();
-                        crate::console::info(console, "edit",
-                            format!("opening externally: {}", path.display()));
-                        open_external(&path, console);
-                    }
-                });
-            }
+            // (The large-file warning + Open externally button used
+            // to live here. Both moved to the editor's bottom action
+            // row in tab_lists.rs so the affordance is always
+            // visible — no surprise threshold, no duplicate
+            // placement. `open_external` is now pub(super) so the
+            // bottom row can call it directly.)
+            // Suppress unused-variable warning for the threaded
+            // editor preference — kept on the signature for future
+            // per-buffer needs even though this function no longer
+            // consumes it directly.
+            let _ = preferred_external_editor;
 
             if do_find {
                 let stripped = ui.ctx().input_mut(|i| {
@@ -545,9 +529,30 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
 /// snapshot. Called once per frame at the top of `ensure_for`. Cap the
 /// stack at `UNDO_LIMIT` entries so very long sessions don't grow without
 /// bound. Any new change clears the redo stack.
-/// Hand a path to the OS default editor / text-handler. Best-
-/// effort — failure is logged but doesn't surface a modal.
-fn open_external(path: &std::path::Path, console: &crate::console::Handle) {
+/// Hand a path to the user's preferred editor (when configured)
+/// or the OS default handler. Best-effort — failure is logged but
+/// doesn't surface a modal. Falls back to the OS default if the
+/// preferred editor exists in config but spawning it fails (bad
+/// path, missing exe), so the button always opens *something*.
+pub(super) fn open_external(
+    path: &std::path::Path,
+    console: &crate::console::Handle,
+    preferred_editor: &str,
+) {
+    let preferred = preferred_editor.trim();
+    if !preferred.is_empty() {
+        match std::process::Command::new(preferred).arg(path).spawn() {
+            Ok(_) => {
+                crate::console::info(console, "edit",
+                    format!("opened {} in preferred editor: {preferred}",
+                        path.display()));
+                return;
+            }
+            Err(e) => crate::console::warn(console, "edit", format!(
+                "preferred editor '{preferred}' failed to spawn ({e}) — \
+                 falling back to OS default")),
+        }
+    }
     #[cfg(target_os = "windows")]
     let result = std::process::Command::new("cmd")
         .args(["/c", "start", "", &path.display().to_string()])
