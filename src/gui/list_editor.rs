@@ -37,6 +37,12 @@ struct Buffer {
     /// Snapshot of `text` at the moment we last pushed to the undo stack.
     /// When the live `text` diverges from this we push another snapshot.
     last_snapshot: String,
+    /// When the previous snapshot was committed to the undo stack.
+    /// Used to debounce: typing in a single ~500ms burst gets one
+    /// undo unit instead of one-per-keystroke (which on a 5MB
+    /// buffer was cloning ~10MB into the undo stack per character
+    /// — a real perf killer).
+    last_snapshot_at: Option<std::time::Instant>,
     undo_stack: Vec<String>,
     redo_stack: Vec<String>,
     /// After a successful Find, we record the 0-based line index of the
@@ -55,7 +61,19 @@ struct Buffer {
     diff_content: String,
 }
 
+/// Hard cap on the number of undo entries — protects against an
+/// editor session with millions of tiny edits. Combined with the
+/// 500ms snapshot debounce that's a lot of edit history.
 const UNDO_LIMIT: usize = 500;
+/// Hard cap on the total undo-stack RAM footprint, summed across
+/// every snapshot. Each snapshot is a full clone of the buffer
+/// (egui's TextEdit owns a String — we don't have a rope), so on
+/// a 5MB list one snapshot is 5MB. With UNDO_LIMIT = 500 alone
+/// the worst case is 2.5GB of pinned RAM — at which point the OS
+/// is swapping and the editor feels unusably sluggish for
+/// reasons unrelated to egui itself. We trim oldest snapshots
+/// until the total fits this budget.
+const UNDO_BYTES_LIMIT: usize = 64 * 1024 * 1024;
 
 pub struct ListEditorState;
 
@@ -70,6 +88,7 @@ impl ListEditorState {
                 map.insert(list.path.clone(), Buffer {
                     saved_text:       text.clone(),
                     last_snapshot:    text.clone(),
+                    last_snapshot_at: None,
                     text,
                     find_query:       String::new(),
                     next_search_byte: 0,
@@ -90,7 +109,10 @@ impl ListEditorState {
             // (Header row with path/modified/backup-name was removed —
             // long paths overlapped the window and the same info is shown
             // in the action row at the bottom of the tab.)
-            let _dirty = st.text != st.saved_text;
+            //
+            // The previous `let _dirty = st.text != st.saved_text;` was
+            // doing an O(n) memcmp per frame on a multi-MB buffer for a
+            // value nothing read; removed.
 
             // Find row + edit-action buttons.
             //
@@ -166,6 +188,39 @@ impl ListEditorState {
                 }
             });
 
+            // Large-file escape hatch. egui's TextEdit re-lays out
+            // the full buffer on every paint — that cost is
+            // unavoidable inside this widget and dominates editing
+            // latency on multi-MB filter lists. Past a threshold
+            // we surface a one-click "Open externally" button that
+            // hands the file to the OS default editor (Notepad on
+            // Windows, TextEdit on macOS, $VISUAL/$EDITOR via xdg-open
+            // on Linux). Save here in brave-regress will pick up the
+            // external edits on the next Re-scan.
+            const LARGE_FILE_BYTES: usize = 500_000;
+            if st.text.len() > LARGE_FILE_BYTES {
+                ui.horizontal(|ui| {
+                    let mb = st.text.len() as f64 / 1_048_576.0;
+                    ui.colored_label(egui::Color32::from_rgb(220, 180, 60),
+                        format!("Large file ({mb:.1} MiB) — egui re-layouts the \
+                                 full buffer per paint; typing may lag."));
+                    if ui.button("Open externally")
+                        .on_hover_text(
+                            "Hand the on-disk list.txt to the OS default editor \
+                             so you can edit it in something built for big \
+                             files. Save here in brave-regress, then click \
+                             Re-scan in the Lists tab to pick up your changes \
+                             from disk.")
+                        .clicked()
+                    {
+                        let path = list.path.clone();
+                        crate::console::info(console, "edit",
+                            format!("opening externally: {}", path.display()));
+                        open_external(&path, console);
+                    }
+                });
+            }
+
             if do_find {
                 let stripped = ui.ctx().input_mut(|i| {
                     let before = i.events.len();
@@ -238,9 +293,12 @@ impl ListEditorState {
                 // overrides egui's cached scroll position for this frame.
                 if let Some(line) = st.pending_scroll_line.take() {
                     if let Some((a, b)) = st.highlight_chars {
-                        let total = st.text.chars().count();
-                        let a = a.min(total);
-                        let b = b.min(total);
+                        // egui's CCursor clamps internally if the
+                        // index overshoots the buffer; we used to do
+                        // an explicit `a.min(text.chars().count())`
+                        // here as defensive programming, but that
+                        // walked the whole 5MB UTF-8 string per
+                        // frame for no win. Trust egui's clamp.
                         let start_cur = output.galley.from_ccursor(egui::text::CCursor::new(a));
                         let end_cur   = output.galley.from_ccursor(egui::text::CCursor::new(b));
                         let start_rect = output.galley.pos_from_cursor(&start_cur);
@@ -260,9 +318,8 @@ impl ListEditorState {
                 // Paint the find-highlight rectangle (or per-row rectangles
                 // for multi-line matches) on top of the editor.
                 if let Some((a, b)) = st.highlight_chars {
-                    let total = st.text.chars().count();
-                    let a = a.min(total);
-                    let b = b.min(total);
+                    // Same as above — drop the per-frame chars().count()
+                    // clamp; egui's CCursor handles out-of-range internally.
                     let start_cur = output.galley.from_ccursor(egui::text::CCursor::new(a));
                     let end_cur   = output.galley.from_ccursor(egui::text::CCursor::new(b));
                     let start_rect = output.galley.pos_from_cursor(&start_cur);
@@ -488,11 +545,63 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
 /// snapshot. Called once per frame at the top of `ensure_for`. Cap the
 /// stack at `UNDO_LIMIT` entries so very long sessions don't grow without
 /// bound. Any new change clears the redo stack.
+/// Hand a path to the OS default editor / text-handler. Best-
+/// effort — failure is logged but doesn't surface a modal.
+fn open_external(path: &std::path::Path, console: &crate::console::Handle) {
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &path.display().to_string()])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(path).spawn();
+    match result {
+        Ok(_)  => {} // success — OS launcher took over
+        Err(e) => crate::console::error(console, "edit",
+            format!("open externally failed: {e}")),
+    }
+}
+
+/// Drop entries off the front of an undo / redo stack until both
+/// the count cap (`UNDO_LIMIT`) and the byte cap
+/// (`UNDO_BYTES_LIMIT`) are satisfied. Cheap path when the stack
+/// is small; only walks the stack to sum byte sizes when it's
+/// large enough that a count check alone might pass while the
+/// byte budget is busted.
+fn trim_undo(stack: &mut Vec<String>) {
+    while stack.len() > UNDO_LIMIT { stack.remove(0); }
+    let mut bytes: usize = stack.iter().map(|s| s.len()).sum();
+    while bytes > UNDO_BYTES_LIMIT && !stack.is_empty() {
+        bytes -= stack[0].len();
+        stack.remove(0);
+    }
+}
+
+/// Time-debounce window for committing an undo snapshot. A typing
+/// burst inside this window collapses into a single undo unit;
+/// pause longer than this and the next change becomes a fresh
+/// unit. Matches what every text editor does and avoids
+/// per-keystroke full-buffer clones on multi-MB list.txt files.
+const SNAPSHOT_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
 fn maybe_snapshot(st: &mut Buffer) {
     if st.text == st.last_snapshot { return; }
+    let now = std::time::Instant::now();
+    if let Some(prev) = st.last_snapshot_at {
+        if now.duration_since(prev) < SNAPSHOT_DEBOUNCE {
+            // Mid-burst — defer the snapshot. last_snapshot stays
+            // pointing at the previous commit boundary, so a later
+            // call (after the user pauses) will fold every keystroke
+            // since then into one undo unit.
+            return;
+        }
+    }
     st.undo_stack.push(st.last_snapshot.clone());
-    if st.undo_stack.len() > UNDO_LIMIT { st.undo_stack.remove(0); }
+    trim_undo(&mut st.undo_stack);
     st.last_snapshot = st.text.clone();
+    st.last_snapshot_at = Some(now);
     st.redo_stack.clear();
     // Any edit invalidates the find-highlight char offsets — clear it.
     st.highlight_chars = None;
@@ -502,9 +611,12 @@ fn do_undo(st: &mut Buffer, ctx: &egui::Context, editor_id: egui::Id, console: &
     use egui::text::{CCursor, CCursorRange};
     if let Some(prev) = st.undo_stack.pop() {
         st.redo_stack.push(st.text.clone());
-        if st.redo_stack.len() > UNDO_LIMIT { st.redo_stack.remove(0); }
+        trim_undo(&mut st.redo_stack);
         st.text = prev.clone();
         st.last_snapshot = prev;
+        // Reset the debounce timer so the next typing burst doesn't
+        // collapse into the just-undone unit.
+        st.last_snapshot_at = None;
         let total = st.text.chars().count();
         if let Some(mut s) = egui::TextEdit::load_state(ctx, editor_id) {
             s.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(total))));
@@ -521,9 +633,10 @@ fn do_redo(st: &mut Buffer, ctx: &egui::Context, editor_id: egui::Id, console: &
     use egui::text::{CCursor, CCursorRange};
     if let Some(next) = st.redo_stack.pop() {
         st.undo_stack.push(st.text.clone());
-        if st.undo_stack.len() > UNDO_LIMIT { st.undo_stack.remove(0); }
+        trim_undo(&mut st.undo_stack);
         st.text = next.clone();
         st.last_snapshot = next;
+        st.last_snapshot_at = None;
         let total = st.text.chars().count();
         if let Some(mut s) = egui::TextEdit::load_state(ctx, editor_id) {
             s.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(total))));
