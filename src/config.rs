@@ -68,6 +68,7 @@ pub struct Gui {
     /// they reopen the app. `[x, y]` in egui screen coords. None
     /// until the window has been moved at least once.
     #[serde(default)] pub note_window_pos: Option<[f32; 2]>,
+    #[serde(default)] pub regression_report_pos: Option<[f32; 2]>,
     /// UI theme: `"dark"` (default) or `"light"`. Anything else falls
     /// back to dark.
     #[serde(default = "default_theme")] pub theme: String,
@@ -149,6 +150,7 @@ impl Default for Gui {
             auto_open_url: String::new(),
             preferred_external_editor: String::new(),
             note_window_pos: None,
+            regression_report_pos: None,
             theme: "dark".into(),
             channel_release: false,
             channel_beta:    false,

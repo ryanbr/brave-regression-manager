@@ -1289,6 +1289,85 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     });
 
     render_note_editor(ui, state);
+    render_regression_report_window(ui, state);
+}
+
+/// Popup window showing the Markdown regression report. Same
+/// sticky-position + just-opened-force-pos pattern as the Note
+/// editor — survives across renders, position remembered via
+/// `state.regression_report_pos`.
+fn render_regression_report_window(ui: &mut Ui, state: &mut AppState) {
+    if !state.regression_report_open { return; }
+    let mut open = true;
+    let mut win = egui::Window::new("Regression report")
+        .id(egui::Id::new("regression_report_window"))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(620.0)
+        .default_height(440.0)
+        .open(&mut open);
+    let just_opened = std::mem::take(&mut state.regression_report_just_opened);
+    if let Some(p) = state.regression_report_pos {
+        if just_opened {
+            win = win.current_pos(p);
+        } else {
+            win = win.default_pos(p);
+        }
+    }
+    let prev_pos = state.regression_report_pos;
+    let mut close_after = false;
+    let inner = win.show(ui.ctx(), |ui| {
+        ui.horizontal(|ui| {
+            if ui.button("Copy to clipboard")
+                .on_hover_text(
+                    "Re-copy the report shown below to the clipboard. \
+                     The Show report button on the bracket header \
+                     already copied once when the window opened.")
+                .clicked()
+            {
+                ui.ctx().copy_text(state.regression_report_text.clone());
+                state.status_msg = format!(
+                    "regression report ({} bytes) copied to clipboard",
+                    state.regression_report_text.len());
+            }
+            if ui.button("Close").clicked() {
+                close_after = true;
+            }
+            super::app::weak_label(ui, format!(
+                "{} bytes  ·  Markdown",
+                state.regression_report_text.len()));
+        });
+        ui.separator();
+        // Read-only multi-line view. egui::TextEdit::multiline with
+        // a non-mut borrow + interactive() makes the text selectable
+        // and copyable but not editable. Monospace so the table
+        // alignment is preserved on screen.
+        let mut shown = state.regression_report_text.clone();
+        ui.add(egui::TextEdit::multiline(&mut shown)
+            .desired_width(f32::INFINITY)
+            .desired_rows(20)
+            .font(egui::TextStyle::Monospace)
+            .code_editor()
+            .interactive(true));
+        // The clone above means user-typed edits would be discarded
+        // — we deliberately don't write back. The TextEdit is just
+        // a selectable viewer.
+    });
+    if let Some(r) = inner {
+        let pos = r.response.rect.min;
+        let drifted = match prev_pos {
+            Some(prev) => (prev.x - pos.x).abs() > 0.5
+                       || (prev.y - pos.y).abs() > 0.5,
+            None => true,
+        };
+        if drifted {
+            state.regression_report_pos = Some(pos);
+            state.config_dirty = true;
+        }
+    }
+    if !open || close_after {
+        state.regression_report_open = false;
+    }
 }
 
 /// Renders the Status / action cell for one Available row. Pulled out of
@@ -1633,6 +1712,36 @@ fn render_compare_one(
                 crate::console::info(&state.console, "compare", &url);
                 open_url(&url);
             }
+            // Markdown summary suitable for pasting into a Brave
+            // GitHub issue. Pulls the channel + tags + dates +
+            // Chromium pins from the same row_by_tag map the
+            // bracket-header just used. Copy-only — no network
+            // calls, no GUI side-effects beyond the clipboard +
+            // status-bar confirmation.
+            if ui.button("Show report")
+                .on_hover_text(
+                    "Open a popup window with a Markdown-formatted summary \
+                     of this regression bracket: channel, GOOD / BAD tags \
+                     with their release dates and Chromium pins, compare \
+                     URLs for brave-core and Chromium, plus every other \
+                     version in this channel that has a verdict. Pasteable \
+                     directly into a GitHub bug report. The popup also has \
+                     its own Copy to clipboard button.")
+                .clicked()
+            {
+                let report = build_regression_report(
+                    state, channel, good, bad, older, newer,
+                    &older_chr, &newer_chr, row_by_tag);
+                ui.ctx().copy_text(report.clone());
+                let n = report.len();
+                state.regression_report_text = report;
+                state.regression_report_open = true;
+                state.regression_report_just_opened = true;
+                state.status_msg = format!(
+                    "regression report ({n} bytes) shown + copied to clipboard");
+                crate::console::info(&state.console, "compare",
+                    "regression report opened (also copied to clipboard)");
+            }
             // (Chromium-compare button + same-pin label removed —
             // the manual Chromium tag override row below this one
             // covers the cases where the user actually wants a
@@ -1864,6 +1973,132 @@ fn spawn_tag_metadata_fetch(state: &mut AppState, tag: String) {
                 ).map_err(|e| format!("sqlite upsert: {e}"))
             });
         slot.lock().unwrap().push((tag, result));
+    });
+}
+
+/// Produce a Markdown summary of a regression bracket suitable
+/// for pasting into a GitHub bug report. Includes channel,
+/// GOOD/BAD tags + their release dates + parsed Chromium pins,
+/// the brave-core compare URL, the chromium/chromium compare URL
+/// when both pins are known and differ, and the list of other
+/// versions in the same channel that the user has marked with a
+/// verdict (so reviewers see the full bisect history, not just
+/// the closest pair).
+#[allow(clippy::too_many_arguments)]
+fn build_regression_report(
+    state: &AppState,
+    channel: &str,
+    good: &str,
+    bad: &str,
+    older: &str,
+    newer: &str,
+    older_chr: &Option<String>,
+    newer_chr: &Option<String>,
+    row_by_tag: &std::collections::HashMap<String, (Option<String>, String)>,
+) -> String {
+    use std::fmt::Write as _;
+    let lookup_meta = |tag: &str| -> (String, String) {
+        let (chr, pa) = row_by_tag.get(tag).cloned()
+            .or_else(|| {
+                let m = verdict::tag_metadata(tag);
+                Some((m.0, m.1.unwrap_or_default()))
+            })
+            .unwrap_or_default();
+        let date = pa.get(..10).unwrap_or(&pa).to_string();
+        (chr.unwrap_or_default(), date)
+    };
+    let (good_chr, good_date) = lookup_meta(good);
+    let (bad_chr,  bad_date)  = lookup_meta(bad);
+    let mut out = String::new();
+    let _ = writeln!(out, "**Brave regression — [{channel}]**");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "| | Tag | Date | Chromium |");
+    let _ = writeln!(out, "|--|---|---|---|");
+    let _ = writeln!(out, "| GOOD | `{good}` | {} | {} |",
+        if good_date.is_empty() { "-" } else { &good_date },
+        if good_chr.is_empty()  { "-" } else { &good_chr });
+    let _ = writeln!(out, "| BAD  | `{bad}`  | {} | {} |",
+        if bad_date.is_empty()  { "-" } else { &bad_date },
+        if bad_chr.is_empty()   { "-" } else { &bad_chr });
+    let _ = writeln!(out);
+    let _ = writeln!(out, "**Compare ranges**");
+    let _ = writeln!(out, "- brave-core: https://github.com/brave/brave-core/compare/{older}...{newer}");
+    if let (Some(a), Some(b)) = (older_chr, newer_chr) {
+        if a != b {
+            let _ = writeln!(out,
+                "- Chromium:   https://github.com/chromium/chromium/compare/{a}...{b}");
+        } else {
+            let _ = writeln!(out,
+                "- Chromium:   {a} (unchanged across the bracket)");
+        }
+    }
+
+    // Other tested versions in this channel — anything with a
+    // verdict (other than Untested / Unknown) that isn't the
+    // bracket's GOOD or BAD endpoint. Ordered newest-first so
+    // reviewers see the bisect at a glance.
+    //
+    // Bulk-fetch verdicts in one sqlite query and look up each
+    // tag against the resulting HashMap, instead of running a
+    // SELECT per row. Same pattern the Available list render
+    // uses; saves ~200 sqlite roundtrips per click on a populated
+    // channel.
+    let verdicts_by_tag = verdict::all_version_verdicts();
+    let mut others: Vec<(String, Verdict, String, String)> = Vec::new();
+    for r in state.available.iter() {
+        if r.channel != channel { continue; }
+        if r.tag == good || r.tag == bad { continue; }
+        let v = verdicts_by_tag.get(&r.tag).copied().unwrap_or(Verdict::Unknown);
+        if matches!(v, Verdict::Unknown | Verdict::Untested) { continue; }
+        let date = r.published_at.get(..10).unwrap_or(&r.published_at).to_string();
+        let chr = r.chromium_version.clone().unwrap_or_default();
+        others.push((r.tag.clone(), v, date, chr));
+    }
+    sort_tags_newest_first_pairs(&mut others);
+    if !others.is_empty() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "**Other tested versions in this channel**");
+        for (tag, v, date, chr) in others {
+            let label = match v {
+                Verdict::Good     => "GOOD",
+                Verdict::Bad      => "BAD",
+                Verdict::Buggy    => "BUGGY",
+                Verdict::Unsure   => "UNSURE",
+                Verdict::Untested => "NEW",
+                Verdict::Unknown  => "?",
+            };
+            let chr_part = if chr.is_empty() { String::new() }
+                           else { format!(" · Chromium {chr}") };
+            let date_part = if date.is_empty() { String::new() }
+                            else { format!(" · {date}") };
+            let _ = writeln!(out, "- {label} `{tag}`{date_part}{chr_part}");
+        }
+    }
+
+    // Attribution footer — separator + one-liner so reviewers
+    // can see at a glance how the report was generated and where
+    // to grab the tool. Italics-prefixed so it visually
+    // de-emphasises against the data above.
+    let _ = writeln!(out);
+    let _ = writeln!(out, "---");
+    let _ = writeln!(out,
+        "*Generated by Brave Regression Manager: \
+         https://github.com/ryanbr/brave-regression-manager*");
+    out
+}
+
+/// `sort_tags_newest_first` for tuples whose first element is
+/// the tag — used by the regression-report builder.
+fn sort_tags_newest_first_pairs(
+    rows: &mut [(String, Verdict, String, String)],
+) {
+    rows.sort_by(|a, b| {
+        let pa = semver::Version::parse(a.0.trim_start_matches('v')).ok();
+        let pb = semver::Version::parse(b.0.trim_start_matches('v')).ok();
+        match (pa, pb) {
+            (Some(a), Some(b)) => b.cmp(&a),
+            _ => b.0.cmp(&a.0),
+        }
     });
 }
 

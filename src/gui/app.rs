@@ -191,6 +191,8 @@ impl App {
         state.preferred_external_editor = cfg.gui.preferred_external_editor.clone();
         state.note_window_pos = cfg.gui.note_window_pos
             .map(|[x, y]| egui::pos2(x, y));
+        state.regression_report_pos = cfg.gui.regression_report_pos
+            .map(|[x, y]| egui::pos2(x, y));
         state.theme = cfg.gui.theme.clone();
         state.channel_release = cfg.gui.channel_release;
         state.channel_beta    = cfg.gui.channel_beta;
@@ -353,6 +355,8 @@ impl App {
         cfg.gui.auto_open_url         = self.state.auto_open_url.clone();
         cfg.gui.preferred_external_editor = self.state.preferred_external_editor.clone();
         cfg.gui.note_window_pos = self.state.note_window_pos
+            .map(|p| [p.x, p.y]);
+        cfg.gui.regression_report_pos = self.state.regression_report_pos
             .map(|p| [p.x, p.y]);
         cfg.gui.theme = self.state.theme.clone();
         cfg.gui.channel_release = self.state.channel_release;

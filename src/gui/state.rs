@@ -454,6 +454,12 @@ pub struct AppState {
     /// persisted to config.toml on change. None means egui's
     /// default-centered placement on first open.
     pub note_window_pos: Option<egui::Pos2>,
+    /// "Copy regression report" popup state. Same lifecycle as
+    /// the Note editor: text + sticky position + just-opened flag.
+    pub regression_report_open: bool,
+    pub regression_report_text: String,
+    pub regression_report_pos:  Option<egui::Pos2>,
+    pub regression_report_just_opened: bool,
     /// Set to true on every editor-open transition. The render
     /// path uses it to force `current_pos` for one frame, defeating
     /// stale egui memory that would otherwise place the window
@@ -557,6 +563,10 @@ impl AppState {
             editing_note_buf: String::new(),
             note_window_pos: None,
             note_window_just_opened: false,
+            regression_report_open: false,
+            regression_report_text: String::new(),
+            regression_report_pos: None,
+            regression_report_just_opened: false,
             status_msg: String::new(),
             rt,
             slots: AsyncSlots::default(),
