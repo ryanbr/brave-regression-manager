@@ -234,6 +234,13 @@ jobs:
         run: |
           set -euo pipefail
           app="target/${{ matrix.target }}/release/Brave Regression Manager.app"
+          # CFBundleShortVersionString / CFBundleVersion must be a
+          # numeric dotted form (e.g. 0.9.0). Strip the leading v
+          # from the release tag so Finder Get-Info / About dialogs
+          # / any auto-update tooling read the actual release
+          # version instead of a hardcoded placeholder.
+          tag="${{ steps.tag.outputs.tag }}"
+          ver="${tag#v}"
           rm -rf "$app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "target/${{ matrix.target }}/release/brave-regress" "$app/Contents/MacOS/brave-regress"
@@ -248,8 +255,8 @@ jobs:
             <key>CFBundleName</key>                  <string>Brave Regression Manager</string>
             <key>CFBundleDisplayName</key>           <string>Brave Regression Manager</string>
             <key>CFBundlePackageType</key>           <string>APPL</string>
-            <key>CFBundleShortVersionString</key>    <string>0.1.0</string>
-            <key>CFBundleVersion</key>               <string>0.1.0</string>
+            <key>CFBundleShortVersionString</key>    <string>${ver}</string>
+            <key>CFBundleVersion</key>               <string>${ver}</string>
             <key>LSMinimumSystemVersion</key>        <string>11.0</string>
             <key>NSHighResolutionCapable</key>       <true/>
             <key>NSPrincipalClass</key>              <string>NSApplication</string>
@@ -259,6 +266,8 @@ jobs:
           PLIST
           codesign --force --deep --sign - "$app"
           codesign -dv "$app" 2>&1
+          # Sanity-check the embedded version made it into the plist.
+          plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist"
           ls -la "$app/Contents"
 
       - name: Stage archive (Unix)
