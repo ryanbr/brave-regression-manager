@@ -35,6 +35,11 @@ impl ConsoleLog {
     pub fn entries(&self) -> impl Iterator<Item = &Entry> { self.entries.iter() }
     pub fn len(&self)   -> usize { self.entries.len() }
     pub fn clear(&mut self)      { self.entries.clear(); }
+    /// O(1) index access by oldest-first position. Used by the
+    /// Console panel's viewport-rendered ScrollArea so we can
+    /// paint only the on-screen rows instead of laying out every
+    /// entry per frame. Returns None for out-of-range indices.
+    pub fn get(&self, idx: usize) -> Option<&Entry> { self.entries.get(idx) }
 }
 
 pub type Handle = Arc<Mutex<ConsoleLog>>;

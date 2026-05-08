@@ -57,25 +57,41 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     });
     ui.separator();
 
-    egui::ScrollArea::vertical().auto_shrink([false; 2]).stick_to_bottom(true).show(ui, |ui|
-    {
-        let entries: Vec<console::Entry> = state.console.lock()
-            .map(|g| g.entries().cloned().collect())
-            .unwrap_or_default();
-        if entries.is_empty() {
-            super::app::weak_label(ui, "(no console output yet)");
-            return;
-        }
-        for e in &entries {
-            let (color, prefix) = match e.level {
-                Level::Info  => (Color32::from_rgb(190, 190, 190), "INFO "),
-                Level::Warn  => (Color32::from_rgb(220, 180, 60),  "WARN "),
-                Level::Error => (Color32::from_rgb(220, 80, 80),   "ERROR"),
-                Level::Brave => (Color32::from_rgb(100, 180, 220), "BRAVE"),
+    // Viewport-rendered. ScrollArea::show_rows tells egui exactly
+    // how many rows there are and the uniform row height; egui
+    // then asks the closure to paint only the on-screen subset
+    // each frame. Without this, every entry was format!()'d and
+    // laid out per paint regardless of visibility — at thousands
+    // of entries that's hundreds of KB of allocation per frame.
+    let total = state.console.lock().map(|g| g.len()).unwrap_or(0);
+    if total == 0 {
+        super::app::weak_label(ui, "(no console output yet)");
+        return;
+    }
+    let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .stick_to_bottom(true)
+        .show_rows(ui, row_h, total, |ui, range| {
+            // Lock the Console once per visible-rows render.
+            // VecDeque::get is O(1), so the per-row index access
+            // is cheap. Lock duration is bounded by the closure
+            // (sync rendering).
+            let g = match state.console.lock() {
+                Ok(g) => g,
+                Err(_) => return,
             };
-            let ts = e.ts.format("%H:%M:%S").to_string();
-            let line = format!("{ts}  {prefix}  [{}]  {}", e.source, e.msg);
-            ui.label(RichText::new(line).monospace().color(color));
-        }
-    });
+            for i in range {
+                let Some(e) = g.get(i) else { continue };
+                let (color, prefix) = match e.level {
+                    Level::Info  => (Color32::from_rgb(190, 190, 190), "INFO "),
+                    Level::Warn  => (Color32::from_rgb(220, 180, 60),  "WARN "),
+                    Level::Error => (Color32::from_rgb(220, 80, 80),   "ERROR"),
+                    Level::Brave => (Color32::from_rgb(100, 180, 220), "BRAVE"),
+                };
+                let ts = e.ts.format("%H:%M:%S").to_string();
+                let line = format!("{ts}  {prefix}  [{}]  {}", e.source, e.msg);
+                ui.label(RichText::new(line).monospace().color(color));
+            }
+        });
 }
