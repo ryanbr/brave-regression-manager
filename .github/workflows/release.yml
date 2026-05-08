@@ -171,6 +171,17 @@ jobs:
             target: x86_64-pc-windows-msvc
             ext:    .exe
             archive: zip
+          # Windows on ARM. Cross-compile from the same x64 runner —
+          # GitHub's `windows-latest` image ships with VS's ARM64
+          # MSVC build tools so `cargo build --target
+          # aarch64-pc-windows-msvc` links cleanly. brave-regress's
+          # own host-asset picker on ARM Windows prefers ARM Brave
+          # first and falls back to x64 Brave under emulation when
+          # an ARM build of Brave isn't published for the tag.
+          - os:     windows-latest
+            target: aarch64-pc-windows-msvc
+            ext:    .exe
+            archive: zip
           - os:     macos-14            # Apple Silicon runner
             target: aarch64-apple-darwin
             ext:    ''
