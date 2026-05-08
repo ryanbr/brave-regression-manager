@@ -193,6 +193,7 @@ impl App {
             .map(|[x, y]| egui::pos2(x, y));
         state.regression_report_pos = cfg.gui.regression_report_pos
             .map(|[x, y]| egui::pos2(x, y));
+        state.regression_report_use_markdown = cfg.gui.regression_report_use_markdown;
         state.theme = cfg.gui.theme.clone();
         state.channel_release = cfg.gui.channel_release;
         state.channel_beta    = cfg.gui.channel_beta;
@@ -358,6 +359,7 @@ impl App {
             .map(|p| [p.x, p.y]);
         cfg.gui.regression_report_pos = self.state.regression_report_pos
             .map(|p| [p.x, p.y]);
+        cfg.gui.regression_report_use_markdown = self.state.regression_report_use_markdown;
         cfg.gui.theme = self.state.theme.clone();
         cfg.gui.channel_release = self.state.channel_release;
         cfg.gui.channel_beta    = self.state.channel_beta;

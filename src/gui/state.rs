@@ -457,7 +457,16 @@ pub struct AppState {
     /// "Copy regression report" popup state. Same lifecycle as
     /// the Note editor: text + sticky position + just-opened flag.
     pub regression_report_open: bool,
-    pub regression_report_text: String,
+    /// Both formats are rendered at click time and held in
+    /// memory; the popup's format toggle picks which one is
+    /// displayed + copied. Cheaper than re-rendering on toggle
+    /// (we'd need to cache the bracket-input data otherwise) and
+    /// the report itself is small (~1-3 KiB).
+    pub regression_report_md:   String,
+    pub regression_report_txt:  String,
+    /// Format toggle persisted to config.toml so the user's
+    /// preferred output style sticks across sessions.
+    pub regression_report_use_markdown: bool,
     pub regression_report_pos:  Option<egui::Pos2>,
     pub regression_report_just_opened: bool,
     /// Set to true on every editor-open transition. The render
@@ -564,7 +573,9 @@ impl AppState {
             note_window_pos: None,
             note_window_just_opened: false,
             regression_report_open: false,
-            regression_report_text: String::new(),
+            regression_report_md:  String::new(),
+            regression_report_txt: String::new(),
+            regression_report_use_markdown: true,
             regression_report_pos: None,
             regression_report_just_opened: false,
             status_msg: String::new(),
