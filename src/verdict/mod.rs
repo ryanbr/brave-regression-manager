@@ -166,12 +166,17 @@ fn open() -> Result<MutexGuard<'static, Connection>> {
 
 /// Read the per-version extra command-line args saved for `tag`.
 /// Empty string when none configured.
+/// Single-row lookups run per rendered row per frame — the Installed
+/// list and the bracket panel each hit these for every installed
+/// version, on every repaint. `query_row` re-parses its SQL on each
+/// call; `prepare_cached` keeps the compiled statement on the
+/// connection, so the repeat cost drops to a bind and a step. Same
+/// query, same result — only the parse is skipped.
 pub fn launch_args(tag: &str) -> String {
     let conn = match open() { Ok(c) => c, Err(_) => return String::new() };
-    conn.query_row(
-        "SELECT args FROM launch_args WHERE tag=?1",
-        params![tag], |r| r.get::<_, String>(0)
-    ).unwrap_or_default()
+    conn.prepare_cached("SELECT args FROM launch_args WHERE tag=?1")
+        .and_then(|mut st| st.query_row(params![tag], |r| r.get::<_, String>(0)))
+        .unwrap_or_default()
 }
 
 /// Persist per-version extra args. Empty string clears the row.
@@ -246,10 +251,9 @@ pub fn parse_launch_args(args: &str) -> Vec<String> {
 /// app's standard profile dir is used.
 pub fn user_data_dir(tag: &str) -> String {
     let conn = match open() { Ok(c) => c, Err(_) => return String::new() };
-    conn.query_row(
-        "SELECT path FROM user_data_dir WHERE tag=?1",
-        params![tag], |r| r.get::<_, String>(0)
-    ).unwrap_or_default()
+    conn.prepare_cached("SELECT path FROM user_data_dir WHERE tag=?1")
+        .and_then(|mut st| st.query_row(params![tag], |r| r.get::<_, String>(0)))
+        .unwrap_or_default()
 }
 
 /// Persist a per-tag custom `--user-data-dir`. Empty / whitespace clears it.
@@ -269,10 +273,9 @@ pub fn set_user_data_dir(tag: &str, path: &str) -> Result<()> {
 /// Read the freeform note attached to a tag. Empty string means none.
 pub fn note(tag: &str) -> String {
     let conn = match open() { Ok(c) => c, Err(_) => return String::new() };
-    conn.query_row(
-        "SELECT body FROM notes WHERE tag=?1",
-        params![tag], |r| r.get::<_, String>(0)
-    ).unwrap_or_default()
+    conn.prepare_cached("SELECT body FROM notes WHERE tag=?1")
+        .and_then(|mut st| st.query_row(params![tag], |r| r.get::<_, String>(0)))
+        .unwrap_or_default()
 }
 
 /// Persist a freeform note for a tag. Empty / whitespace clears it.
@@ -375,9 +378,10 @@ pub fn clear_all_notes() -> Result<usize> {
 
 pub fn version_verdict(tag: &str) -> Result<Verdict> {
     let conn = open()?;
-    let v: Option<String> = conn.query_row(
-        "SELECT verdict FROM version_verdict WHERE tag=?1",
-        params![tag], |r| r.get(0)).ok();
+    let v: Option<String> = conn
+        .prepare_cached("SELECT verdict FROM version_verdict WHERE tag=?1")
+        .and_then(|mut st| st.query_row(params![tag], |r| r.get(0)))
+        .ok();
     Ok(v.as_deref().map(Verdict::from_db).unwrap_or(Verdict::Unknown))
 }
 
