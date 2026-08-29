@@ -447,68 +447,67 @@ pub fn pick_asset_for_install_key<'a>(release: &'a Release, key: &str)
     }
 }
 
+/// Windows-only zip marker. Requires a Windows marker AND rejects the
+/// other platforms', so `brave-v…-darwin-x64.zip` cannot false-match on
+/// a bare "x64" substring.
+///
+/// Module-level, and deliberately: this was a closure copied into both
+/// Windows pickers, and `installer_assets` restated it a third time.
+/// Three copies of one marker list is how the Linux rule silently
+/// stopped matching its picker.
+#[cfg(windows)]
+fn is_windows_zip(n: &str) -> bool {
+    let l = n.to_lowercase();
+    (l.contains("win32") || l.contains("win64") || l.contains("win-")
+     || l.contains("windows-") || l.contains("-win"))
+        && !l.contains("darwin") && !l.contains("linux")
+        && !l.contains("mac") && !l.contains("osx")
+}
+
+/// Linux zip marker. Accepts the distro names Brave has used as well as
+/// a bare "linux".
+#[cfg(all(unix, not(target_os = "macos")))]
+fn is_linux_zip(n: &str) -> bool {
+    let l = n.to_lowercase();
+    (l.contains("linux") || l.contains("ubuntu") || l.contains("debian"))
+        && !l.contains("darwin") && !l.contains("mac")
+        && !l.contains("win32") && !l.contains("win64")
+}
+
+/// True when a picker on THIS host could ever consider the asset —
+/// ignoring channel and architecture, which the pickers apply
+/// themselves.
+///
+/// The single source of truth for "is this file any use to us here".
+/// `installer_assets` filters the cached list with it, so the cache can
+/// never drop something a picker would go on to select. Symbol and debug
+/// bundles are excluded for archives only: the Windows Standalone
+/// matchers key on the `.exe` extension alone, so anything ending `.exe`
+/// is kept regardless of its name.
+fn host_candidate_asset(name: &str) -> bool {
+    let l = name.to_lowercase();
+    let junk = l.contains("symbol") || l.contains("pdb") || l.contains("debug");
+    #[cfg(windows)]
+    { l.ends_with(".exe") || (l.ends_with(".zip") && is_windows_zip(name) && !junk) }
+    #[cfg(target_os = "macos")]
+    { l.ends_with(".dmg") || (l.ends_with(".zip") && is_macos_zip(name) && !junk) }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    { l.ends_with(".deb") || (l.ends_with(".zip") && is_linux_zip(name) && !junk) }
+}
+
 /// The subset of a release's assets worth caching for a later re-pick.
 ///
 /// A Brave release lists ~135 files — every platform's installers, plus a
 /// `.sha256` and `.asc` beside most of them — and the row is serialised
 /// into both releases.json and every sqlite release_cache row, on the
-/// startup parse path. Only what a picker on THIS host could ever return
-/// is useful, so the filter is both by kind and by platform: a Windows
-/// machine has no use for a `.dmg`, and can never be asked for one.
+/// startup parse path. Measured against v1.96.29: 135 published, 8 kept
+/// on Windows. 4196 to 1472 bytes per row, ~16 MB to ~5.6 MB across a
+/// 4000-tag cache, and the same saving again on the startup JSON parse.
 ///
-/// Measured against a real release (v1.96.29): 135 assets, 23 after the
-/// kind filter alone, 8 after this one — 4196 to 1472 bytes per row, so
-/// roughly 16 MB down to 5.6 MB across a 4000-tag cache, and the same
-/// saving again on the JSON parsed at startup.
-///
-/// The rule is derived from what `pick_for_host` and `pick_x86_for_host`
-/// actually match on each platform, so nothing a picker could select is
-/// dropped. Both architectures are kept — the arch re-pick needs the
-/// other one — and a cache carried to a different OS simply reports
-/// `needs_asset_backfill` and refetches.
+/// The rule itself lives in `host_candidate_asset` so that the cache and
+/// the pickers cannot disagree about what is selectable.
 pub fn installer_assets(assets: &[ReleaseAsset]) -> Vec<ReleaseAsset> {
-    assets.iter().filter(|a| {
-        let l = a.name.to_lowercase();
-        if l.contains("symbol") || l.contains("pdb") || l.contains("debug") {
-            return false;
-        }
-        // Windows: every `.exe` (the Standalone / Silent matchers key on
-        // the extension alone — those names carry no "win" marker), plus
-        // zips carrying a Windows marker.
-        #[cfg(windows)]
-        {
-            l.ends_with(".exe")
-                || (l.ends_with(".zip")
-                    && (l.contains("win32") || l.contains("win64")
-                        || l.contains("win-") || l.contains("windows-")
-                        || l.contains("-win"))
-                    && !l.contains("darwin") && !l.contains("linux")
-                    && !l.contains("mac") && !l.contains("osx"))
-        }
-        #[cfg(target_os = "macos")]
-        {
-            l.ends_with(".dmg")
-                || (l.ends_with(".zip")
-                    && (l.contains("darwin") || l.contains("macos")
-                        || l.contains("osx") || l.contains("mac-"))
-                    && !l.contains("linux")
-                    && !l.contains("win32") && !l.contains("win64"))
-        }
-        // Mirrors `is_linux_zip` exactly, markers and exclusions both:
-        // it also accepts "ubuntu" and "debian", and excludes win32 /
-        // win64 rather than any "win". Checking only for "linux" would
-        // have dropped an ubuntu-named zip the picker matches — the
-        // silent-failure case this filter is written to avoid.
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            l.ends_with(".deb")
-                || (l.ends_with(".zip")
-                    && (l.contains("linux") || l.contains("ubuntu")
-                        || l.contains("debian"))
-                    && !l.contains("darwin") && !l.contains("mac")
-                    && !l.contains("win32") && !l.contains("win64"))
-        }
-    }).cloned().collect()
+    assets.iter().filter(|a| host_candidate_asset(&a.name)).cloned().collect()
 }
 
 /// Re-run the host asset pick against an already-known asset list.
@@ -609,13 +608,6 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
     // Windows-only — explicitly require a Windows OS marker AND reject
     // macOS/Linux markers, otherwise `brave-v…-darwin-x64.zip` would
     // false-match on a bare "x64" substring.
-    let is_windows_zip = |n: &str| -> bool {
-        let l = n.to_lowercase();
-        (l.contains("win32") || l.contains("win64") || l.contains("win-")
-         || l.contains("windows-") || l.contains("-win"))
-            && !l.contains("darwin") && !l.contains("linux")
-            && !l.contains("mac") && !l.contains("osx")
-    };
 
     let zip_x64 = |n: &str| -> bool {
         zip_clean(n) && is_windows_zip(n)
@@ -690,13 +682,6 @@ fn pick_x86_for_host(assets: &[ReleaseAsset], channel: Channel)
 {
     let exe_ok = |n: &str| -> bool {
         n.ends_with(".exe") && name_compatible(n, channel)
-    };
-    let is_windows_zip = |n: &str| -> bool {
-        let l = n.to_lowercase();
-        (l.contains("win32") || l.contains("win64") || l.contains("win-")
-         || l.contains("windows-") || l.contains("-win"))
-            && !l.contains("darwin") && !l.contains("linux")
-            && !l.contains("mac") && !l.contains("osx")
     };
     let zip_x64 = |n: &str| -> bool {
         let l = n.to_lowercase();
@@ -966,12 +951,6 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
     // in the filename; channel comes from the release. Require linux marker
     // AND reject darwin/win markers so a Brave macOS / Windows zip can't
     // false-match this picker on bare arch tokens.
-    let is_linux_zip = |n: &str| -> bool {
-        let l = n.to_lowercase();
-        (l.contains("linux") || l.contains("ubuntu") || l.contains("debian"))
-            && !l.contains("darwin") && !l.contains("mac")
-            && !l.contains("win32") && !l.contains("win64")
-    };
     // Reject `*-symbols.zip` / debug bundles for the same reason as the
     // Windows / macOS pickers — alphabetical order can put them ahead of
     // the real archive.
@@ -1002,4 +981,98 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
         if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
     }
     None
+}
+
+#[cfg(test)]
+mod asset_filter_tests {
+    use super::*;
+
+    /// Names taken from a real release (v1.96.29). These call the
+    /// production predicate rather than restating it — the previous
+    /// version of this test kept its own copy of the rule, which is the
+    /// same duplication that let the Linux marker list drift out of sync
+    /// with `is_linux_zip` in the first place.
+    const REAL: &[&str] = &[
+        "brave-v1.96.29-win32-x64.zip",
+        "brave-v1.96.29-win32-arm64.zip",
+        "BraveBrowserStandaloneSilentNightlySetup.exe",
+        "BraveBrowserStandaloneNightlySetup.exe",
+        "brave-v1.96.29-darwin-x64.zip",
+        "brave-v1.96.29-darwin-arm64.zip",
+        "Brave-Browser-Nightly-x64.dmg",
+        "Brave-Browser-Nightly-arm64.dmg",
+        "brave-v1.96.29-linux-amd64.zip",
+        "brave-browser-nightly-ubuntu-amd64.zip",
+        "brave-browser-nightly-debian-arm64.zip",
+        "brave-browser-nightly_1.96.29_amd64.deb",
+        "brave-browser-nightly_1.96.29_arm64.deb",
+        "brave-v1.96.29-win32-x64-symbols.zip",
+        "brave-v1.96.29-win32-x64.zip.sha256",
+        "release.asc",
+    ];
+
+    /// Both architectures survive: the offline re-pick exists to choose
+    /// the one the host is not currently running.
+    #[test]
+    fn keeps_both_architectures_for_this_platform() {
+        let k: Vec<&str> = REAL.iter().copied()
+            .filter(|n| host_candidate_asset(n)).collect();
+        #[cfg(windows)]
+        {
+            assert!(k.contains(&"brave-v1.96.29-win32-x64.zip"));
+            assert!(k.contains(&"brave-v1.96.29-win32-arm64.zip"));
+            // Extension-only matcher: carries no platform marker at all.
+            assert!(k.contains(&"BraveBrowserStandaloneSilentNightlySetup.exe"));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(k.contains(&"brave-v1.96.29-darwin-x64.zip"));
+            assert!(k.contains(&"brave-v1.96.29-darwin-arm64.zip"));
+            assert!(k.contains(&"Brave-Browser-Nightly-arm64.dmg"));
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            assert!(k.contains(&"brave-v1.96.29-linux-amd64.zip"));
+            // The markers that were missing until they were pinned here.
+            assert!(k.contains(&"brave-browser-nightly-ubuntu-amd64.zip"));
+            assert!(k.contains(&"brave-browser-nightly-debian-arm64.zip"));
+            assert!(k.contains(&"brave-browser-nightly_1.96.29_arm64.deb"));
+        }
+    }
+
+    /// Checksums, signatures and symbol bundles are never selectable.
+    #[test]
+    fn drops_non_installers() {
+        for n in ["brave-v1.96.29-win32-x64.zip.sha256", "release.asc",
+                  "brave-v1.96.29-win32-x64-symbols.zip"] {
+            assert!(!host_candidate_asset(n), "{n} should not be cached");
+        }
+    }
+
+    /// Whatever a picker matches must survive the cache filter. Asserted
+    /// against the pickers themselves, so the two cannot drift.
+    #[test]
+    fn every_asset_a_picker_selects_is_kept() {
+        let assets: Vec<ReleaseAsset> = REAL.iter().map(|n| ReleaseAsset {
+            name: (*n).to_string(), size: 1,
+            browser_download_url: String::new(),
+        }).collect();
+        for ch in [Channel::Nightly, Channel::Beta, Channel::Release] {
+            for picked in [pick_for_host(&assets, ch), pick_x86_for_host(&assets, ch)]
+                .into_iter().flatten()
+            {
+                assert!(host_candidate_asset(&picked.name),
+                    "picker selected {:?} but the cache filter drops it",
+                    picked.name);
+            }
+        }
+    }
+
+    /// The filter has to actually bite, or it is not worth the risk.
+    #[test]
+    fn cuts_the_list_substantially() {
+        let k = REAL.iter().filter(|n| host_candidate_asset(n)).count();
+        assert!(k * 2 <= REAL.len(),
+                "kept {k} of {} — filter is not biting", REAL.len());
+    }
 }
