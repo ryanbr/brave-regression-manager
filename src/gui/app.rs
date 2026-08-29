@@ -53,7 +53,7 @@ fn render_settings_tab(ui: &mut egui::Ui, state: &mut super::state::AppState) {
         .auto_shrink([false, false])
         .show(ui, |ui|
     {
-        for (_, font) in ui.style_mut().text_styles.iter_mut() {
+        for font in ui.style_mut().text_styles.values_mut() {
             font.size += 2.0;
         }
         super::tab_versions::render_settings_panel(ui, state, "tab");

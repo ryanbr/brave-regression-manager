@@ -67,7 +67,10 @@ pub fn list_pref_candidate_files(profile_dir: &Path) -> Vec<(String, u64, std::t
             .to_string_lossy().into_owned();
         out.push((rel, meta.len(), meta.modified().unwrap_or(std::time::UNIX_EPOCH)));
     }
-    out.sort_by(|a, b| b.2.cmp(&a.2));
+    // Newest first. `sort_by_key` with a Reverse key rather than a
+    // hand-rolled comparator — same order, and clippy's sort_by_key
+    // lint (stable 1.98) rejects the comparator form.
+    out.sort_by_key(|e| std::cmp::Reverse(e.2));
     out
 }
 
