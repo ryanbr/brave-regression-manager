@@ -494,11 +494,19 @@ pub fn installer_assets(assets: &[ReleaseAsset]) -> Vec<ReleaseAsset> {
                     && !l.contains("linux")
                     && !l.contains("win32") && !l.contains("win64"))
         }
+        // Mirrors `is_linux_zip` exactly, markers and exclusions both:
+        // it also accepts "ubuntu" and "debian", and excludes win32 /
+        // win64 rather than any "win". Checking only for "linux" would
+        // have dropped an ubuntu-named zip the picker matches — the
+        // silent-failure case this filter is written to avoid.
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             l.ends_with(".deb")
-                || (l.ends_with(".zip") && l.contains("linux")
-                    && !l.contains("darwin") && !l.contains("win"))
+                || (l.ends_with(".zip")
+                    && (l.contains("linux") || l.contains("ubuntu")
+                        || l.contains("debian"))
+                    && !l.contains("darwin") && !l.contains("mac")
+                    && !l.contains("win32") && !l.contains("win64"))
         }
     }).cloned().collect()
 }

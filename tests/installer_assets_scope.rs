@@ -36,8 +36,11 @@ fn kept(name: &str) -> bool {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         l.ends_with(".deb")
-            || (l.ends_with(".zip") && l.contains("linux")
-                && !l.contains("darwin") && !l.contains("win"))
+            || (l.ends_with(".zip")
+                && (l.contains("linux") || l.contains("ubuntu")
+                    || l.contains("debian"))
+                && !l.contains("darwin") && !l.contains("mac")
+                && !l.contains("win32") && !l.contains("win64"))
     }
 }
 
@@ -51,6 +54,10 @@ const REAL: &[&str] = &[
     "Brave-Browser-Nightly-x64.dmg",
     "Brave-Browser-Nightly-arm64.dmg",
     "brave-v1.96.29-linux-amd64.zip",
+    // `is_linux_zip` accepts these markers too — a filter checking only
+    // for "linux" would silently drop them.
+    "brave-browser-nightly-ubuntu-amd64.zip",
+    "brave-browser-nightly-debian-arm64.zip",
     "brave-browser-nightly_1.96.29_amd64.deb",
     "brave-browser-nightly_1.96.29_arm64.deb",
     "brave-v1.96.29-win32-x64-symbols.zip",
@@ -80,6 +87,8 @@ fn keeps_both_architectures_for_this_platform() {
     {
         assert!(k.contains(&"brave-v1.96.29-linux-amd64.zip"));
         assert!(k.contains(&"brave-browser-nightly_1.96.29_arm64.deb"));
+        assert!(k.contains(&"brave-browser-nightly-ubuntu-amd64.zip"));
+        assert!(k.contains(&"brave-browser-nightly-debian-arm64.zip"));
     }
 }
 
