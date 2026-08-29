@@ -1,0 +1,134 @@
+# Manual, artefact-only build. No tag, no Release, no version bump.
+#
+# release.yml is the only thing that has ever compiled the macOS and
+# ARM-Windows targets, and it only runs on a `v*` tag or a dispatch that
+# mints a Release — so the sole way to type-check those platforms was to
+# cut a version. A macOS build break duly reached master and survived
+# four review passes, because `cfg(target_os = "macos")` code is
+# invisible to a Linux or Windows compiler.
+#
+# This runs the same matrix, uploads the binaries as workflow artefacts,
+# and publishes nothing.
+name: Build check (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which target to build'
+        type: choice
+        default: all
+        options:
+          - all
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+          - aarch64-apple-darwin
+      clippy:
+        description: 'Also run clippy with warnings denied'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The matrix is built here rather than filtered with a job-level `if`:
+  # the `matrix` context is not available in `jobs.<id>.if`, so such a
+  # condition would silently never match. Selecting the targets up front
+  # also means a single-target run spins up one runner, not four that
+  # skip.
+  plan:
+    name: Pick targets
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.pick.outputs.include }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          WANT: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          # Mirrors release.yml's matrix: the point is to compile exactly
+          # what a release compiles, so a break here is a break there.
+          all='[
+            {"os":"ubuntu-22.04",   "target":"x86_64-unknown-linux-gnu", "ext":""},
+            {"os":"windows-latest", "target":"x86_64-pc-windows-msvc",   "ext":".exe"},
+            {"os":"windows-latest", "target":"aarch64-pc-windows-msvc",  "ext":".exe"},
+            {"os":"macos-14",       "target":"aarch64-apple-darwin",     "ext":""}
+          ]'
+          if [ "$WANT" = all ]; then
+            include=$(jq -c . <<<"$all")
+          else
+            include=$(jq -c --arg t "$WANT" '[.[] | select(.target == $t)]' <<<"$all")
+          fi
+          if [ "$(jq -r 'length' <<<"$include")" -eq 0 ]; then
+            echo "::error::no target matched '$WANT'"
+            exit 1
+          fi
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+          echo "building: $include"
+
+  build:
+    needs: plan
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.include) }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-check-${{ matrix.target }}
+
+      # eframe's glow backend + arboard's clipboard backends + rfd's
+      # xdg-portal backend all need a few system libs on Linux.
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev \
+            libgtk-3-dev
+
+      # Per-target clippy is the part that actually closes the gap: it
+      # type-checks the cfg arm for THIS platform, which is where the
+      # macOS break lived. The codebase carries zero warnings, so denying
+      # them keeps it that way rather than merely reporting.
+      - name: Clippy
+        if: ${{ inputs.clippy }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: >-
+          cargo clippy --release --locked --all-targets
+          --target ${{ matrix.target }} -- -D warnings
+
+      - name: Build
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Raw binary, not the archive/.app treatment release.yml applies —
+      # this is for testing a change, not for distribution. GitHub zips
+      # the artefact itself, so the executable bit survives on macOS and
+      # Linux.
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: brave-regress-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/brave-regress${{ matrix.ext }}
+          if-no-files-found: error
+          retention-days: 14
