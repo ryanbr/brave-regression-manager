@@ -261,8 +261,9 @@ async fn list_releases_streaming(
             .unwrap_or_else(|| "no (full walk)".into())));
 
     // Named so the "why did it stop" line at the end can't drift out of
-    // sync with the breaks themselves.
-    let mut stop_reason = "page ceiling (200)";
+    // sync with the breaks themselves — including the ceiling, which is
+    // derived from max_pages rather than restated.
+    let mut stop_reason = format!("page ceiling ({max_pages})");
 
     for page_num in 1..=max_pages {
         let page = match octo.repos(OWNER, REPO).releases().list()
@@ -276,19 +277,20 @@ async fn list_releases_streaming(
                 // anyhow wrapper is what makes the message readable at
                 // all: octocrab's Error Displays as the bare word
                 // "GitHub" and keeps the API's text in its source.
-                let err = anyhow::Error::new(e)
-                    .context(format!("GitHub releases page {page_num}"));
-                if let Some(h) = console {
-                    crate::console::error(h, "github", format!("{err:#}"));
-                }
-                return Err(err);
+                //
+                // Deliberately not logged here — the caller's result
+                // drain prints it with the matching hint appended, and
+                // the context below survives into that message. Logging
+                // both would show one failure as two.
+                return Err(anyhow::Error::new(e)
+                    .context(format!("GitHub releases page {page_num}")));
             }
         };
         let page_items = page.items.len();
         let before = out.len();
         if page.items.is_empty() {
             log(format!("page {page_num}: empty — no more releases"));
-            stop_reason = "release list exhausted";
+            stop_reason = "release list exhausted".to_string();
             break;
         }
 
@@ -337,15 +339,20 @@ async fn list_releases_streaming(
             if out.len() >= effective_target { break; }
         }
         on_progress(out.clone());
-        log(format!(
-            "page {page_num}: {page_items} releases, {} kept after channel \
-             filter (running total {})",
+        // "added", not "kept after the channel filter": the delta also
+        // shrinks when the incremental short-circuit or the target cap
+        // breaks out mid-page, and the GUI always passes an
+        // all-channels filter — so attributing it to the filter would
+        // name the one cause that is usually not responsible. Each of
+        // those exits logs its own reason.
+        log(format!("page {page_num}: {page_items} releases, {} added \
+                     (running total {})",
             out.len() - before, out.len()));
         // Stop when we've reached our (uncapped if stop_at) target,
         // crossed the stop_at floor, or hit a known tag (incremental).
-        if out.len() >= effective_target { stop_reason = "reached target"; break; }
-        if crossed_stop  { stop_reason = "crossed the stop_at date"; break; }
-        if crossed_known { stop_reason = "reached the cached tags"; break; }
+        if out.len() >= effective_target { stop_reason = "reached target".to_string(); break; }
+        if crossed_stop  { stop_reason = "crossed the stop_at date".to_string(); break; }
+        if crossed_known { stop_reason = "reached the cached tags".to_string(); break; }
     }
     log(format!("fetch done: {} releases in {:.1}s ({stop_reason})",
         out.len(), started.elapsed().as_secs_f64()));

@@ -2319,24 +2319,13 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
     } else {
         format!("fetching {count} tags…")
     };
-    // Pre-fetch summary — confirms what we're about to walk and
-    // whether the request is going through anonymous (60 req/hr) or
-    // token-authenticated (5000 req/hr) GitHub API quota. Helps
-    // when troubleshooting slow / rate-limited fetches.
-    let chans_str = {
-        let mut v: Vec<&str> = Vec::new();
-        if state.channel_release { v.push("Release"); }
-        if state.channel_beta    { v.push("Beta"); }
-        if state.channel_nightly { v.push("Nightly"); }
-        if v.is_empty() { "Nightly".to_string() } else { v.join("+") }
-    };
-    let auth_str = if !state.github_token.is_empty() { "token (5000/hr)" }
-                   else                              { "anonymous (60/hr)" };
-    let stop_str = state.date_from.map(|d| format!("stop_at={d}"))
-        .unwrap_or_else(|| "no stop_at".to_string());
-    crate::console::info(&state.console, "github", format!(
-        "fetch start: count<={count}  channels={chans_str}  {stop_str}  \
-         auth={auth_str}"));
+    // The pre-fetch summary lives in `list_releases_streaming` now. The
+    // version that used to be here reported three things it could not
+    // know: the channel checkboxes (the filter passed below is
+    // hardcoded all-channels), `count` (which stop_at overrides), and an
+    // auth mode derived from the Settings token alone (blind to
+    // GITHUB_TOKEN). Two contradictory lines under one source is worse
+    // than none.
     // Snapshot the oldest cached release date so the async task can
     // decide whether incremental's known-tag short-circuit is safe to
     // apply (it isn't when the user is asking for something deeper

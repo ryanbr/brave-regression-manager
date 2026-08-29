@@ -106,14 +106,18 @@ fn fetch_failure_hint(raw: &str) -> Option<&'static str> {
     // is the tell that separates it from a rate limit or a network
     // stall. Anonymous access still works, so clearing the field is a
     // valid answer for anyone under the 60 req/hr cap.
-    if lc.contains("bad credentials")
-        || lc.contains("401")
-        || lc.contains("requires authentication")
-    {
-        return Some("GitHub rejected the token in Settings -> GitHub \
-                     token: it has been revoked, deleted, or expired. \
+    // Anchored on GitHub's own wording, never a bare "401": this hint is
+    // also applied to the regional-catalog result, whose parse failures
+    // read "<url> parse: … at line N column M" — a catalog that fails at
+    // line 401 would otherwise be reported as a revoked token.
+    if lc.contains("bad credentials") || lc.contains("requires authentication") {
+        return Some("GitHub rejected the token being used: it has been \
+                     revoked, deleted, or expired. The token comes from \
+                     Settings -> GitHub token, or from a GITHUB_TOKEN \
+                     environment variable when that field is empty — the \
+                     'fetch start' Console line names which one was sent. \
                      Issue a fresh personal access token (no scopes \
-                     needed), or clear the field to fall back to \
+                     needed), or remove it entirely to fall back to \
                      anonymous access at 60 req/hr.");
     }
     if lc.contains("403") || lc.contains("rate limit") {
