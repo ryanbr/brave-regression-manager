@@ -16,6 +16,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             {
                 if let Ok(mut g) = state.console.lock() { g.clear(); }
                 state.console_content_w = 0.0;
+                state.console_last_max_chars = 0;
             }
             // Copy the entire Console buffer to clipboard, in the
             // same `HH:MM:SS  LEVEL  [source]  msg` shape the panel
@@ -118,7 +119,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // The char estimate is the floor; `console_content_w` is the running
     // max of what egui actually laid out, which covers the glyphs the
     // monospace face doesn't own and whose real advance is wider.
-    let content_w = ((g.max_line_chars() + PREFIX_CHARS) as f32 * char_w)
+    // A drop in the char floor means the ring evicted the widest line,
+    // so the painted-width ratchet is now holding an extent nothing on
+    // screen needs. Release it and let it rebuild from what's left.
+    let max_chars = g.max_line_chars();
+    if max_chars < state.console_last_max_chars { state.console_content_w = 0.0; }
+    state.console_last_max_chars = max_chars;
+    let content_w = ((max_chars + PREFIX_CHARS) as f32 * char_w)
         .max(state.console_content_w);
     let out = egui::ScrollArea::both()
         .auto_shrink([false; 2])

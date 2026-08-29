@@ -28,9 +28,9 @@ pub struct ConsoleLog {
     /// so if those rows defined the content width it would collapse
     /// whenever the viewport sat on short lines — egui clamps the
     /// scroll offset to `content - viewport` every frame, snapping the
-    /// user back to column 0 mid-read. Grows only; a ring eviction can
-    /// leave it wider than the widest surviving line, which costs a
-    /// little dead scroll range and nothing else.
+    /// user back to column 0 mid-read. A ring eviction can
+    /// leave it wider than the widest surviving line only until that
+    /// line is itself evicted, which triggers a recompute.
     max_line_chars: usize,
 }
 
@@ -59,11 +59,30 @@ impl ConsoleLog {
         }
     }
 
+    /// Rendered width of one entry, in chars, excluding the panel's
+    /// fixed timestamp/level/source prefix.
+    fn width_of(e: &Entry) -> usize {
+        e.source.chars().count() + e.msg.chars().count()
+    }
+
     /// Ring insert for one already-single-line entry.
     fn push_line(&mut self, e: Entry) {
-        if self.entries.len() == self.capacity { self.entries.pop_front(); }
-        self.max_line_chars = self.max_line_chars
-            .max(e.source.chars().count() + e.msg.chars().count());
+        if self.entries.len() == self.capacity {
+            let evicted = self.entries.pop_front();
+            // Only the widest line leaving can lower the max, so the
+            // O(n) refold is rare rather than per-push. Without it the
+            // max is pinned by the widest line *ever* seen, and that is
+            // not a small overshoot: `--enable-logging=stderr --v=3`
+            // (a Settings option) emits stderr lines thousands of chars
+            // wide, which the 1000-entry ring drops within seconds —
+            // leaving the horizontal scrollbar a sliver over empty
+            // space for the rest of the session.
+            if evicted.as_ref().is_some_and(|old| Self::width_of(old) >= self.max_line_chars) {
+                self.max_line_chars =
+                    self.entries.iter().map(Self::width_of).max().unwrap_or(0);
+            }
+        }
+        self.max_line_chars = self.max_line_chars.max(Self::width_of(&e));
         self.entries.push_back(e);
     }
     pub fn entries(&self) -> impl Iterator<Item = &Entry> { self.entries.iter() }

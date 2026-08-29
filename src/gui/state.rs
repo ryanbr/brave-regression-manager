@@ -491,6 +491,11 @@ pub struct AppState {
     /// can't collapse when a wide row scrolls out of view. Reset by
     /// "Clear Console".
     pub console_content_w: f32,
+    /// Last `ConsoleLog::max_line_chars()` the panel saw. When the ring
+    /// evicts its widest line the char floor drops, and the monotonic
+    /// `console_content_w` above would otherwise keep the old extent
+    /// alive forever — so a drop here releases the ratchet.
+    pub console_last_max_chars: usize,
 }
 
 pub struct RunningBrave {
@@ -509,6 +514,7 @@ impl AppState {
         Self {
             console,
             console_content_w: 0.0,
+            console_last_max_chars: 0,
             tab: Tab::Versions,
             installed: std::sync::Arc::new(vec![]),
             available: std::sync::Arc::new(vec![]),

@@ -2168,14 +2168,23 @@ fn render_report_markdown(d: &ReportData) -> String {
         "- brave-core: https://github.com/brave/brave-core/compare/{}...{}",
         d.older, d.newer);
     if let (Some(a), Some(b)) = (&d.older_chr, &d.newer_chr) {
-        let note = if d.chr_adjusted { " *(adjusted to tagged milestones)*" }
-                   else               { "" };
         if a != b {
+            let note = if d.chr_adjusted { " *(adjusted to tagged milestones)*" }
+                       else               { "" };
             let _ = writeln!(out,
                 "- Chromium:   https://github.com/chromium/chromium/compare/{a}...{b}{note}");
+        } else if d.chr_adjusted {
+            // Both sides nudged to the *same* tagged milestone — the
+            // workflow the override row exists for when neither real pin
+            // is tagged. The real pins are in the table above and they
+            // differ, so "unchanged across the bracket" would be a plain
+            // falsehood pasted into a Brave bug report.
+            let _ = writeln!(out,
+                "- Chromium:   both endpoints adjusted to {a} \
+                 (see the pins in the table above)");
         } else {
             let _ = writeln!(out,
-                "- Chromium:   {a} (unchanged across the bracket){note}");
+                "- Chromium:   {a} (unchanged across the bracket)");
         }
     }
     if !d.others.is_empty() {
@@ -2225,14 +2234,20 @@ fn render_report_plain(d: &ReportData) -> String {
         "  brave-core: https://github.com/brave/brave-core/compare/{}...{}",
         d.older, d.newer);
     if let (Some(a), Some(b)) = (&d.older_chr, &d.newer_chr) {
-        let note = if d.chr_adjusted { " (adjusted to tagged milestones)" }
-                   else               { "" };
         if a != b {
+            let note = if d.chr_adjusted { " (adjusted to tagged milestones)" }
+                       else               { "" };
             let _ = writeln!(out,
                 "  Chromium:   https://github.com/chromium/chromium/compare/{a}...{b}{note}");
+        } else if d.chr_adjusted {
+            // See render_report_markdown — never claim "unchanged" when
+            // the equality came from the override row rather than Brave.
+            let _ = writeln!(out,
+                "  Chromium:   both endpoints adjusted to {a} \
+                 (see the pins above)");
         } else {
             let _ = writeln!(out,
-                "  Chromium:   {a} (unchanged across the bracket){note}");
+                "  Chromium:   {a} (unchanged across the bracket)");
         }
     }
     if !d.others.is_empty() {
