@@ -419,6 +419,32 @@ pub fn pick_asset(release: &Release) -> Result<&ReleaseAsset> {
     pick_asset_for(release, channel)
 }
 
+/// Re-run the host asset pick against an already-known asset list.
+///
+/// The picked asset is host-architecture-specific, but a cached
+/// `ReleaseRow` records only the *result*. Exposing the pick lets a row
+/// cached by a build running on another architecture be corrected
+/// offline — no API call — instead of showing an x64 zip forever on an
+/// ARM host because the incremental fetch short-circuits before it ever
+/// re-picks.
+pub fn pick_host_asset(assets: &[ReleaseAsset], channel: Channel)
+    -> Option<&ReleaseAsset>
+{
+    pick_for_host(assets, channel)
+}
+
+/// Parse the channel label persisted in a cached row.
+pub fn channel_from_label(s: &str) -> Channel {
+    match s {
+        "Beta"    => Channel::Beta,
+        "Release" => Channel::Release,
+        // "Nightly", "?" and anything unrecognised: Nightly is the
+        // permissive case for `name_compatible`, so a row whose channel
+        // never got classified still gets a usable pick.
+        _         => Channel::Nightly,
+    }
+}
+
 fn pick_asset_for(release: &Release, channel: Channel) -> Result<&ReleaseAsset> {
     let names: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
     if let Some(a) = pick_for_host(&release.assets, channel) { return Ok(a); }

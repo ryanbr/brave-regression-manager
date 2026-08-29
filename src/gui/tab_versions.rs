@@ -1979,6 +1979,8 @@ fn spawn_add_by_tag(state: &mut AppState, tag: String) {
                     tag: r.tag, published_at: r.published_at,
                     host_asset: r.host_asset, asset_url, asset_size,
                     skip_reason, cached: false, channel, chromium_version,
+                    assets: r.assets,
+                    picked_arch: std::env::consts::ARCH.to_string(),
                 };
                 row.refresh_cached();
                 if let Ok(json) = serde_json::to_string(&row) {
@@ -2334,6 +2336,7 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         .filter_map(|r| r.published_at.get(..10))
         .filter_map(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
         .min();
+    let backfill      = state.available.iter().any(|r| r.needs_asset_backfill());
     let slot          = state.slots.available.clone();
     let partial_slot  = state.slots.partial_releases.clone();
     let token         = state.github_token.clone();
@@ -2384,6 +2387,11 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     cached: false,
                     channel,
                     chromium_version,
+                    // Kept so a later run on a different CPU
+                    // architecture can redo the pick without a
+                    // network call.
+                    assets: r.assets,
+                    picked_arch: std::env::consts::ARCH.to_string(),
                 };
                 row.refresh_cached_with(dl_idx);
                 if let Ok(json) = serde_json::to_string(&row) {
@@ -2403,7 +2411,13 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
             (Some(_),    None)       => true,
             _                        => false,
         };
-        let known = if need_deeper_walk { Default::default() }
+        // A row cached before `assets` was persisted, by a build on
+        // another architecture, cannot be re-picked offline — the
+        // asset list it would need was never stored. The incremental
+        // short-circuit would skip straight past those rows, so bypass
+        // it once to backfill them. Self-clearing: after this walk the
+        // rows carry their assets and the current arch.
+        let known = if need_deeper_walk || backfill { Default::default() }
                     else                { verdict::known_release_cache_tags() };
         let dl_idx = super::state::read_downloads_index();
         let result = if !need_deeper_walk {

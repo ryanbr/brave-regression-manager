@@ -117,6 +117,16 @@ pub struct ReleaseRow {
     pub asset_url:   Option<String>,   // direct download URL for the picked asset
     pub asset_size:  Option<u64>,
     pub skip_reason: String,           // empty when host_asset is Some
+    /// Every asset GitHub listed for this release, kept so the pick can
+    /// be redone offline when the host architecture changes. Defaulted
+    /// for rows cached before this field existed — those cannot be
+    /// re-picked and need one fetch to backfill.
+    #[serde(default)]
+    pub assets: Vec<crate::versions::github::ReleaseAsset>,
+    /// `std::env::consts::ARCH` of the build that chose `host_asset`.
+    /// Empty for rows cached before this existed.
+    #[serde(default)]
+    pub picked_arch: String,
     /// True when the asset is already downloaded to the cache directory at
     /// the expected size — install can skip the download and go straight to
     /// extract. Computed at fetch time and refreshed after each install /
@@ -202,6 +212,47 @@ impl ReleaseRow {
     /// persist a channel string. Brave's portable `.zip` filenames carry
     /// no channel marker, so unmarked rows stay `?` until the next fetch
     /// re-derives the channel from the full asset list.
+    /// Redo the host asset pick if this row was cached by a build running
+    /// on a different CPU architecture. Returns true when it changed
+    /// something, so the caller can re-persist.
+    ///
+    /// Until v0.9.1 there was no ARM Windows build, so an ARM machine ran
+    /// the x64 binary and cached the x64 zip for every tag. The
+    /// incremental fetch breaks out at the first known tag, so those
+    /// picks are never revisited — the list would show `…-win32-x64.zip`
+    /// forever even once an arm64 build is running.
+    ///
+    /// Rows cached before `assets` was persisted carry an empty list and
+    /// cannot be corrected here; `needs_asset_backfill` spots those and
+    /// forces one full walk to repopulate them.
+    pub fn repick_for_host_arch(&mut self) -> bool {
+        if self.picked_arch == std::env::consts::ARCH { return false; }
+        if self.assets.is_empty() { return false; }
+        let ch = crate::versions::github::channel_from_label(&self.channel);
+        match crate::versions::github::pick_host_asset(&self.assets, ch) {
+            Some(a) => {
+                self.host_asset  = Some(a.name.clone());
+                self.asset_url   = Some(a.browser_download_url.clone());
+                self.asset_size  = Some(a.size);
+                self.skip_reason = String::new();
+            }
+            None => {
+                self.host_asset  = None;
+                self.asset_url   = None;
+                self.asset_size  = None;
+                self.skip_reason = "no installer for this platform".to_string();
+            }
+        }
+        self.picked_arch = std::env::consts::ARCH.to_string();
+        true
+    }
+
+    /// True when this row predates the stored-asset cache and was picked
+    /// by a different architecture — it can only be fixed by refetching.
+    pub fn needs_asset_backfill(&self) -> bool {
+        self.assets.is_empty() && self.picked_arch != std::env::consts::ARCH
+    }
+
     pub fn ensure_channel(&mut self) {
         if !self.channel.is_empty() { return; }
         let probe = format!("{} {}",

@@ -374,6 +374,29 @@ impl App {
                         by_tag.entry(r.tag.clone()).or_insert(r);
                     }
                 }
+                // Correct any row whose asset was picked by a build
+                // running on a different CPU architecture — the ARM
+                // Windows build inheriting an x64 cache is the case
+                // this exists for. Offline; re-persisted so the fix
+                // sticks.
+                let mut repicked = 0usize;
+                for r in by_tag.values_mut() {
+                    if r.repick_for_host_arch() {
+                        // asset_size just changed, so the "already
+                        // downloaded" flag derived from it is stale.
+                        r.refresh_cached_with(&dl_idx);
+                        repicked += 1;
+                        if let Ok(j) = serde_json::to_string(&r) {
+                            let _ = crate::verdict::upsert_release_cache_row(&r.tag, &j);
+                        }
+                    }
+                }
+                if repicked > 0 {
+                    crate::console::info(&console_for_purge, "cache", format!(
+                        "re-picked the install asset for {repicked} cached \
+                         release(s): they were chosen on a different CPU \
+                         architecture ({})", std::env::consts::ARCH));
+                }
                 rows = by_tag.into_values().collect();
                 rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                 payload = (rows, Some(cache.fetched_at));
