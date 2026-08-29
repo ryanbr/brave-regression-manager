@@ -246,17 +246,28 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // window. Each row is tagged with its channel from the available
     // cache (or "?" when unknown — those still pair with each other but
     // never cross with a known channel).
+    // Installed tags come from directory names, so an emulated install
+    // arrives as "<tag>+x86" — which matches no Available row and would
+    // bucket every such install into channel "", quietly preventing it
+    // from ever bracketing against a native one.
     let channel_of = |tag: &str| -> String {
-        state.available.iter().find(|r| r.tag == tag)
+        let base = super::state::ReleaseRow::base_tag(tag);
+        state.available.iter().find(|r| r.tag == base)
             .map(|r| r.channel.clone()).unwrap_or_default()
     };
     let mut goods: Vec<(usize, String, String)> = Vec::new(); // (idx, tag, channel)
     let mut bads:  Vec<(usize, String, String)> = Vec::new();
     for (i, tag) in sorted_tags.iter().enumerate() {
         let ch = channel_of(tag);
+        // The verdict is per-install, so it is read with the full key;
+        // the bracket endpoint is a brave-core ref, so it is recorded as
+        // the bare tag. Without the split, an emulated install put
+        // "<tag>+x86" into compare URLs, tag_metadata lookups and
+        // releases/tags fetches — all of which 404.
+        let base = super::state::ReleaseRow::base_tag(tag).to_string();
         match verdict::version_verdict(tag).unwrap_or(Verdict::Unknown) {
-            Verdict::Good => goods.push((i, tag.clone(), ch)),
-            Verdict::Bad  => bads.push((i, tag.clone(), ch)),
+            Verdict::Good => goods.push((i, base, ch)),
+            Verdict::Bad  => bads.push((i, base, ch)),
             // BUGGY / UNSURE / UNTESTED / Unknown don't anchor a bracket.
             // Only firm GOOD ↔ BAD pairs trigger the compare panel.
             _ => {}
@@ -1124,18 +1135,22 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     // tag/text colour we use (verdict greens/reds, the
                     // green asset-name label, the blue [cached] pill,
                     // the channel pill colours).
+                    // Outside the is_manual split: the native and
+                    // emulated rows are otherwise byte-identical — same
+                    // tag, date, channel and verdict — so without this
+                    // marker on EVERY row the two are indistinguishable
+                    // and a verdict lands on whichever one the user
+                    // guessed at.
+                    if r.x86_variant {
+                        ui.label(RichText::new("[x86]").monospace()
+                            .color(Color32::from_rgb(200, 150, 90)))
+                            .on_hover_text(
+                                "x86-64 build, run under emulation. \
+                                 Installs alongside the native ARM \
+                                 build of the same tag and keeps its \
+                                 own verdict, note and launch args.");
+                    }
                     if is_manual {
-                        if r.x86_variant {
-                            // Marks the emulated build so a verdict is
-                            // never recorded against the wrong one.
-                            ui.label(RichText::new("[x86]").monospace()
-                                .color(Color32::from_rgb(200, 150, 90)))
-                                .on_hover_text(
-                                    "x86-64 build, run under emulation. \
-                                     Installs alongside the native ARM \
-                                     build of the same tag and keeps its \
-                                     own verdict, note and launch args.");
-                        }
                         ui.label(RichText::new(&r.tag).monospace().strong()
                             .color(Color32::from_rgb(120, 220, 230)));
                     } else {
@@ -1207,9 +1222,23 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             .clicked()
                         {
                             let tag = r.tag.clone();
-                            let dir = crate::paths::version_dir(&tag);
-                            let was_installed = dir.exists();
-                            let was_running   = state.running.contains_key(&tag);
+                            // Removing a manual tag drops BOTH its rows
+                            // from Available, so it has to uninstall both
+                            // builds — and each from its own directory.
+                            // Keying this on r.tag alone deleted
+                            // versions/<tag> no matter which row was
+                            // clicked, so Remove on the [x86] row wiped
+                            // the native install and orphaned the
+                            // emulated one with no row left to remove it.
+                            let keys: Vec<String> = [tag.clone(),
+                                                     format!("{tag}+x86")]
+                                .into_iter()
+                                .filter(|k| crate::paths::version_dir(k).exists()
+                                         || state.running.contains_key(k))
+                                .collect();
+                            let was_installed = !keys.is_empty();
+                            let was_running   = keys.iter()
+                                .any(|k| state.running.contains_key(k));
                             // Pre-action echo so the user sees what
                             // they're about to do (and we can later
                             // diagnose a failure mid-sequence).
@@ -1217,31 +1246,40 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                 "removing manual tag {tag} \
                                  (installed={was_installed}, running={was_running})"));
 
-                            if let Some(mut running) = state.running.remove(&tag) {
-                                let pid = running.child.id();
-                                versions::launch::force_kill_tree(pid);
-                                let _ = running.child.kill();
-                                let _ = running.child.wait();
-                                crate::console::info(&state.console, "manual",
-                                    format!("  • killed running Brave (pid {pid})"));
+                            for key in &keys {
+                                if let Some(mut running) = state.running.remove(key) {
+                                    let pid = running.child.id();
+                                    versions::launch::force_kill_tree(pid);
+                                    let _ = running.child.kill();
+                                    let _ = running.child.wait();
+                                    crate::console::info(&state.console, "manual",
+                                        format!("  • killed running Brave for {key} \
+                                                 (pid {pid})"));
+                                }
                             }
 
                             let mut uninstall_note = String::new();
-                            if was_installed {
-                                match std::fs::remove_dir_all(&dir) {
+                            let mut removed = 0usize;
+                            for key in &keys {
+                                let d = crate::paths::version_dir(key);
+                                if !d.exists() { continue; }
+                                match std::fs::remove_dir_all(&d) {
                                     Ok(()) => {
-                                        uninstall_note = " + uninstalled".to_string();
-                                        state.installed = std::sync::Arc::new(
-                                            versions::list_installed().unwrap_or_default());
+                                        removed += 1;
                                         crate::console::info(&state.console, "manual",
-                                            format!("  • uninstalled {}", dir.display()));
+                                            format!("  • uninstalled {}", d.display()));
                                     }
                                     Err(e) => {
                                         uninstall_note = format!(" (uninstall failed: {e})");
                                         crate::console::error(&state.console, "uninstall",
-                                            format!("{tag}: {e:#}"));
+                                            format!("{key}: {e:#}"));
                                     }
                                 }
+                            }
+                            if removed > 0 {
+                                uninstall_note = " + uninstalled".to_string();
+                                state.installed = std::sync::Arc::new(
+                                    versions::list_installed().unwrap_or_default());
                             }
                             state.manual_release_tags.remove(&tag);
                             std::sync::Arc::make_mut(&mut state.available)
@@ -1447,7 +1485,7 @@ fn render_status_cell(
                             RichText::new(name).color(Color32::from_rgb(60, 200, 90)))
                             .truncate(true))
                             .on_hover_text(format!("Asset: {name}"));
-                        let progress = super::state::progress_for(&state.slots, &r.tag);
+                        let progress = super::state::progress_for(&state.slots, &r.install_key());
                         if let Some(p) = progress {
                             let txt = format_progress_text(&p);
                             ui.add(egui::ProgressBar::new(p.fraction())
@@ -1466,7 +1504,7 @@ fn render_status_cell(
                         }
                         let btn_label = if r.cached { "Install (cached)" } else { "Install" };
                         let arch_mismatch = is_opposite_arch_asset(name);
-                        let already_installing = installing_now.contains(&r.tag);
+                        let already_installing = installing_now.contains(&r.install_key());
                         let cap_reached = installing_now.len() >= install_cap;
                         let btn_resp = ui.add_enabled(
                             !already_installing && !cap_reached && !arch_mismatch,
@@ -1489,8 +1527,13 @@ fn render_status_cell(
                                 super::state::MAX_CONCURRENT_INSTALLS_TOKEN))
                         } else { btn_resp };
                         if btn_resp.clicked() {
-                            state.installing.insert(r.tag.clone());
-                            state.installing_started.insert(r.tag.clone(),
+                            // Install-shaped state: must match the key
+                            // the worker reports back under, or the
+                            // entry is never removed and the row stays
+                            // "installing…" — holding a concurrency slot
+                            // and a 100ms repaint — for the session.
+                            state.installing.insert(r.install_key());
+                            state.installing_started.insert(r.install_key(),
                                 std::time::Instant::now());
                             state.status_msg = format!("installing {}…", r.tag);
                             // Pre-install summary — confirms which asset is
@@ -1993,7 +2036,7 @@ fn spawn_add_by_tag(state: &mut AppState, tag: String) {
                     tag: r.tag, published_at: r.published_at,
                     host_asset: r.host_asset, asset_url, asset_size,
                     skip_reason, cached: false, channel, chromium_version,
-                    assets: r.assets,
+                    assets: versions::github::installer_assets(&r.assets),
                     pick_key: versions::github::current_pick_key(),
                     x86_variant: false,
                 };
@@ -2355,7 +2398,14 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         .filter_map(|r| r.published_at.get(..10))
         .filter_map(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
         .min();
-    let backfill      = state.available.iter().any(|r| r.needs_asset_backfill());
+    // Once per session, not once per row still lacking assets: the walk
+    // stops at `effective_target` while the sqlite cache holds thousands
+    // of tags, so rows older than the window keep an empty asset list
+    // and would re-trigger the bypass on every fetch — making each one a
+    // full deep re-walk, the opposite of "self-clearing".
+    let backfill      = !state.asset_backfill_attempted
+        && state.available.iter().any(|r| r.needs_asset_backfill());
+    if backfill { state.asset_backfill_attempted = true; }
     let slot          = state.slots.available.clone();
     let partial_slot  = state.slots.partial_releases.clone();
     let token         = state.github_token.clone();
@@ -2377,8 +2427,14 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         // Convert a Vec<github::Release> → Vec<ReleaseRow> for the GUI.
         // Always persists each row to sqlite `release_cache` so future
         // fetches can short-circuit on known tags.
+        // `persist` is false for the per-page progress callback: it is
+        // handed the *cumulative* list every page, so upserting there
+        // rewrote every row seen so far once per page — O(pages^2) row
+        // writes, each now carrying an asset list. The final result is
+        // persisted once instead.
         fn to_rows(rs: Vec<versions::github::Release>,
-                   dl_idx: &super::state::DownloadsIndex) -> Vec<ReleaseRow> {
+                   dl_idx: &super::state::DownloadsIndex,
+                   persist: bool) -> Vec<ReleaseRow> {
             rs.into_iter().map(|r| {
                 let skip_reason = r.skip_reason();
                 let channel = match versions::github::detect_release_channel(&r) {
@@ -2409,13 +2465,15 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     // Kept so a later run on a different CPU
                     // architecture can redo the pick without a
                     // network call.
-                    assets: r.assets,
+                    assets: versions::github::installer_assets(&r.assets),
                     pick_key: versions::github::current_pick_key(),
                     x86_variant: false,
                 };
                 row.refresh_cached_with(dl_idx);
-                if let Ok(json) = serde_json::to_string(&row) {
-                    let _ = verdict::upsert_release_cache_row(&row.tag, &json);
+                if persist {
+                    if let Ok(json) = serde_json::to_string(&row) {
+                        let _ = verdict::upsert_release_cache_row(&row.tag, &json);
+                    }
                 }
                 row
             }).collect()
@@ -2444,19 +2502,19 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
             versions::github::list_nightly_releases_streaming_incremental(
                 count, tok, stop_at, filter, &known, Some(&console),
                 |partial| {
-                    let rows = to_rows(partial, &dl_idx);
+                    let rows = to_rows(partial, &dl_idx, false);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
-                .map(|rs| to_rows(rs, &dl_idx))
+                .map(|rs| to_rows(rs, &dl_idx, true))
                 .map_err(|e| format!("{e:#}"))
         } else {
             versions::github::list_nightly_releases_streaming(
                 count, tok, stop_at, filter, Some(&console),
                 |partial| {
-                    let rows = to_rows(partial, &dl_idx);
+                    let rows = to_rows(partial, &dl_idx, false);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
-                .map(|rs| to_rows(rs, &dl_idx))
+                .map(|rs| to_rows(rs, &dl_idx, true))
                 .map_err(|e| format!("{e:#}"))
         };
         *slot.lock().unwrap() = Some(result);

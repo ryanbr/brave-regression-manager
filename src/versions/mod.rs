@@ -46,6 +46,17 @@ pub fn list_installed() -> Result<Vec<InstalledVersion>> {
     Ok(out)
 }
 
+/// Strip the variant suffix an install key may carry to get back to the
+/// GitHub release tag.
+///
+/// Installs are keyed by tag for the native build and `<tag>+x86` for
+/// the emulated one, and `list_installed` reads those keys back from
+/// directory names — so any install key heading for the GitHub API has
+/// to come through here first.
+pub fn base_tag(key: &str) -> &str {
+    key.strip_suffix("+x86").unwrap_or(key)
+}
+
 pub fn is_installed(tag: &str) -> bool {
     paths::brave_binary(tag).exists()
 }

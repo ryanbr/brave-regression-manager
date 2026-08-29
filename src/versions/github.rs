@@ -419,6 +419,22 @@ pub fn pick_asset(release: &Release) -> Result<&ReleaseAsset> {
     pick_asset_for(release, channel)
 }
 
+/// The subset of a release's assets worth caching for a later re-pick.
+///
+/// A Brave release lists dozens of files — per-platform installers,
+/// plus a `.sha256` and `.asc` beside most of them — and the row is
+/// serialised into both releases.json and every sqlite release_cache
+/// row, on the startup parse path. Only things a picker could ever
+/// return are useful, so drop the rest before persisting.
+pub fn installer_assets(assets: &[ReleaseAsset]) -> Vec<ReleaseAsset> {
+    assets.iter().filter(|a| {
+        let l = a.name.to_lowercase();
+        (l.ends_with(".zip") || l.ends_with(".exe")
+         || l.ends_with(".dmg") || l.ends_with(".deb"))
+            && !l.contains("symbol") && !l.contains("pdb") && !l.contains("debug")
+    }).cloned().collect()
+}
+
 /// Re-run the host asset pick against an already-known asset list.
 ///
 /// The picked asset is host-architecture-specific, but a cached

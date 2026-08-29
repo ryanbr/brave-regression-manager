@@ -213,11 +213,7 @@ impl ReleaseRow {
         };
     }
 
-    /// Best-effort channel inference from the row's host asset name and
-    /// tag, used to back-fill rows loaded from older caches that didn't
-    /// persist a channel string. Brave's portable `.zip` filenames carry
-    /// no channel marker, so unmarked rows stay `?` until the next fetch
-    /// re-derives the channel from the full asset list.
+
     /// Redo the host asset pick when the inputs behind it have changed —
     /// a different host architecture, or a different Settings
     /// architecture preference. Returns true when it changed something,
@@ -283,9 +279,14 @@ impl ReleaseRow {
     /// Strip the variant suffix an install key may carry, to get back to
     /// the GitHub tag.
     pub fn base_tag(key: &str) -> &str {
-        key.strip_suffix("+x86").unwrap_or(key)
+        crate::versions::base_tag(key)
     }
 
+    /// Best-effort channel inference from the row's host asset name and
+    /// tag, used to back-fill rows loaded from older caches that didn't
+    /// persist a channel string. Brave's portable `.zip` filenames carry
+    /// no channel marker, so unmarked rows stay `?` until the next fetch
+    /// re-derives the channel from the full asset list.
     pub fn ensure_channel(&mut self) {
         if !self.channel.is_empty() { return; }
         let probe = format!("{} {}",
@@ -309,6 +310,12 @@ pub fn expand_arch_rows(rows: Vec<ReleaseRow>, show_x86: bool) -> Vec<ReleaseRow
     if !show_x86 || !crate::versions::github::host_can_run_x86_under_emulation() {
         return rows;
     }
+    // The variant carries a different asset, so the "already
+    // downloaded" flag derived from the native one is meaningless — an
+    // x86 row would otherwise show the blue [cached] pill and
+    // "Install (cached)" for a file that was never fetched. One index
+    // read for the whole expansion.
+    let dl_idx = read_downloads_index();
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let ch = crate::versions::github::channel_from_label(&r.channel);
@@ -328,6 +335,7 @@ pub fn expand_arch_rows(rows: Vec<ReleaseRow>, show_x86: bool) -> Vec<ReleaseRow
             v.asset_url   = Some(url);
             v.asset_size  = Some(size);
             v.skip_reason = String::new();
+            v.refresh_cached_with(&dl_idx);
             out.push(v);
         }
     }
@@ -607,6 +615,9 @@ pub struct AppState {
     /// than one. Mirrored into `github::set_arch_preference` so the
     /// pickers see it.
     pub arch_preference: crate::config::ArchPreference,
+    /// Set once a fetch has bypassed the incremental short-circuit to
+    /// backfill asset lists, so that happens at most once per session.
+    pub asset_backfill_attempted: bool,
     /// Widest content the Console viewport has actually painted, in
     /// points. `max_line_chars` x glyph-width is only an estimate — it
     /// assumes every glyph has the monospace advance, which fails for
@@ -641,6 +652,7 @@ impl AppState {
             console,
             console_content_w: 0.0,
             arch_preference: crate::config::ArchPreference::default(),
+            asset_backfill_attempted: false,
             console_last_max_chars: 0,
             tab: Tab::Versions,
             installed: std::sync::Arc::new(vec![]),

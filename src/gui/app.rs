@@ -363,6 +363,18 @@ impl App {
                 let dl_idx = super::state::read_downloads_index();
                 let mut rows = cache.rows;
                 for r in &mut rows { r.refresh_cached_with(&dl_idx); r.ensure_channel(); }
+                // releases.json rows win over sqlite in the merge below,
+                // so correcting them only in sqlite left the stale pick
+                // to be re-corrected — and re-announced — on every
+                // launch. Fix them here and write the file back.
+                let mut json_fixed = 0usize;
+                for r in rows.iter_mut() {
+                    if r.repick_for_host_arch() { json_fixed += 1; }
+                }
+                if json_fixed > 0 {
+                    for r in rows.iter_mut() { r.refresh_cached_with(&dl_idx); }
+                    let _ = ReleaseCache::save(&rows);
+                }
                 // Always-on incremental cache — union with everything
                 // sqlite has ever seen so the GUI starts up with the
                 // full known history (releases.json holds the last
@@ -382,7 +394,7 @@ impl App {
                 // Windows build inheriting an x64 cache is the case
                 // this exists for. Offline; re-persisted so the fix
                 // sticks.
-                let mut repicked = 0usize;
+                let mut repicked = json_fixed;
                 for r in by_tag.values_mut() {
                     if r.repick_for_host_arch() {
                         // asset_size just changed, so the "already
@@ -720,7 +732,11 @@ impl App {
                     let tag = row.tag.clone();
                     let av = std::sync::Arc::make_mut(&mut self.state.available);
                     av.retain(|r| r.tag != tag);
-                    av.push(row);
+                    // Expand like every other write of `available`, or a
+                    // just-added tag would be the one release missing its
+                    // [x86] row until the next fetch or restart.
+                    av.extend(super::state::expand_arch_rows(
+                        vec![row], self.state.arch_preference.shows_x86()));
                     av.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                     // Mark this tag as user-added so the per-row channel
                     // filter exempts it — adding a Release tag while the
