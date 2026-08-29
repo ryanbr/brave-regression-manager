@@ -210,6 +210,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # rust-toolchain.toml pins the toolchain, and rustup treats a
+      # pinned version as a DIFFERENT install from `stable` even when
+      # they resolve to the same release — so the target std the action
+      # above installs lands on `stable` while cargo runs under the pin,
+      # and a cross-compile fails with "can't find crate for `core`".
+      # Native targets never noticed, because host std ships with every
+      # toolchain; only aarch64-pc-windows-msvc broke. `rustup target
+      # add` here applies to the ACTIVE (pinned) toolchain.
+      - name: Add target to the pinned toolchain
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
