@@ -716,10 +716,20 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
     // under the bare tag for an x64-only release — contradicting the
     // documented contract — and the native_is_same guard in
     // expand_arch_rows then suppressed the [x86] row meant to carry it.
-    let zip_any = |n: &str| -> bool {
+    // Symmetric, and matching the Windows twin's marker set: an ARM
+    // host must not take an x64 asset as its *native* pick (that is the
+    // [x86] row's job, and letting it through here suppresses that row
+    // via the native_is_same guard), and an x64 host must never take an
+    // arm one, which cannot execute at all.
+    let opposite_arch = |n: &str| -> bool {
         let l = n.to_lowercase();
-        zip_clean(n) && !(want_arm && (l.contains("x64") || l.contains("x86_64")))
+        if want_arm {
+            l.contains("x64") || l.contains("x86_64") || l.contains("amd64")
+        } else {
+            l.contains("arm64") || l.contains("aarch64")
+        }
     };
+    let zip_any = |n: &str| -> bool { zip_clean(n) && !opposite_arch(n) };
     let dmg_arm = |n: &str| -> bool {
         n.ends_with(".dmg") && name_compatible(n, channel)
             && (n.contains("arm64") || n.contains("aarch64"))
@@ -733,16 +743,17 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
             && n.to_lowercase().contains("universal")
     };
     let dmg_any = |n: &str| -> bool {
-        let l = n.to_lowercase();
-        n.ends_with(".dmg") && name_compatible(n, channel)
-            && !(want_arm && (l.contains("x64") || l.contains("x86_64")))
+        n.ends_with(".dmg") && name_compatible(n, channel) && !opposite_arch(n)
     };
 
     // Native only — Rosetta 2 builds get their own `[x86]` row.
     let order: Vec<&dyn Fn(&str) -> bool> = if want_arm {
         vec![&zip_arm, &zip_any, &dmg_arm, &dmg_uni, &dmg_any]
     } else {
-        vec![&zip_x64, &zip_any, &dmg_x64, &dmg_uni, &dmg_any, &dmg_arm, &zip_arm]
+        // No cross-arch tail: an ARM Mach-O will not run on Intel, so a
+        // release shipping only arm64 must report "no installer" rather
+        // than install something that cannot start.
+        vec![&zip_x64, &zip_any, &dmg_x64, &dmg_uni, &dmg_any]
     };
     for matcher in order {
         if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
@@ -762,8 +773,9 @@ fn pick_x86_for_host(assets: &[ReleaseAsset], channel: Channel)
             && !l.contains("arm") && !l.contains("aarch64")
     };
     let dmg_x64 = |n: &str| -> bool {
+        let l = n.to_lowercase();
         n.ends_with(".dmg") && name_compatible(n, channel)
-            && (n.contains("x64") || n.contains("x86_64"))
+            && (l.contains("x64") || l.contains("x86_64") || l.contains("amd64"))
     };
     let order: [&dyn Fn(&str) -> bool; 2] = [&zip_x64, &dmg_x64];
     for matcher in order {

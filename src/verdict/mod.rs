@@ -125,8 +125,9 @@ fn init_conn() -> Result<Connection> {
             channel          TEXT
         );
         CREATE TABLE IF NOT EXISTS release_cache (
-            tag  TEXT PRIMARY KEY,
-            json TEXT NOT NULL
+            tag      TEXT PRIMARY KEY,
+            json     TEXT NOT NULL,
+            complete INTEGER NOT NULL DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS manual_release_tags (
             tag TEXT PRIMARY KEY
@@ -136,6 +137,12 @@ fn init_conn() -> Result<Connection> {
             last_used TEXT NOT NULL
         );
     "#)?;
+    // Pre-existing databases predate `complete`. Default 1: everything
+    // already there came from a walk that finished (or from before the
+    // distinction existed), so it is legitimately a known tag.
+    let _ = conn.execute(
+        "ALTER TABLE release_cache ADD COLUMN complete INTEGER NOT NULL DEFAULT 1",
+        []);
     Ok(conn)
 }
 
@@ -437,11 +444,36 @@ pub fn upsert_tag_metadata(
 /// remembered across sessions and an "early 2024" date filter doesn't
 /// re-paginate through 2025/2026 each time.
 pub fn upsert_release_cache_row(tag: &str, json: &str) -> Result<()> {
+    upsert_release_cache_row_with(tag, json, true)
+}
+
+/// As above, but `complete` marks whether the walk that produced this
+/// row ran to completion.
+///
+/// The incremental short-circuit assumes that seeing a known tag means
+/// everything older is known too — true only for a walk that finished.
+/// Persisting pages as they land (so a walk that dies at page 60 does
+/// not throw away its progress) breaks that assumption: the newest ~300
+/// tags land in the table, the next fetch hits one on page 1 and stops,
+/// and the rest of the requested window becomes permanently unreachable.
+/// Partial rows are therefore stored and displayed, but excluded from
+/// `known_release_cache_tags` until the walk completes.
+pub fn upsert_release_cache_row_with(tag: &str, json: &str, complete: bool)
+    -> Result<()>
+{
     let conn = open()?;
     conn.execute(
-        "INSERT INTO release_cache(tag, json) VALUES (?1, ?2)
-         ON CONFLICT(tag) DO UPDATE SET json = excluded.json",
-        params![tag, json])?;
+        "INSERT INTO release_cache(tag, json, complete) VALUES (?1, ?2, ?3)
+         ON CONFLICT(tag) DO UPDATE SET json = excluded.json,
+             complete = MAX(release_cache.complete, excluded.complete)",
+        params![tag, json, if complete { 1 } else { 0 }])?;
+    Ok(())
+}
+
+/// Promote every partial row once a walk has finished.
+pub fn mark_release_cache_complete() -> Result<()> {
+    let conn = open()?;
+    conn.execute("UPDATE release_cache SET complete = 1 WHERE complete = 0", [])?;
     Ok(())
 }
 
@@ -494,13 +526,16 @@ pub fn manual_release_tags() -> std::collections::HashSet<String> {
     out
 }
 
-/// Set of every tag currently stored in `release_cache`. Used by the
-/// fetcher's incremental mode to break out of pagination as soon as it
-/// re-encounters a tag we already know about.
+/// Set of every tag stored by a *completed* walk. Used by the fetcher's
+/// incremental mode to break out of pagination as soon as it
+/// re-encounters a tag we already know about — which is only sound for
+/// rows whose walk finished; see `upsert_release_cache_row_with`.
 pub fn known_release_cache_tags() -> std::collections::HashSet<String> {
     let conn = match open() { Ok(c) => c, Err(_) => return Default::default() };
     let mut out = std::collections::HashSet::new();
-    if let Ok(mut stmt) = conn.prepare("SELECT tag FROM release_cache") {
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT tag FROM release_cache WHERE complete = 1")
+    {
         if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
             out.extend(rows.filter_map(|r| r.ok()));
         }

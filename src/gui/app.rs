@@ -626,7 +626,9 @@ impl App {
                     // is deep and is the one most likely to hit the rate
                     // limit, and a failed walk which consumed the flag
                     // could not be retried without restarting the app.
-                    self.state.asset_backfill_attempted = true;
+                    if *self.state.slots.fetch_was_backfill.lock().unwrap() {
+                        self.state.asset_backfill_attempted = true;
+                    }
                     self.state.available = std::sync::Arc::new(
                         super::state::expand_arch_rows(
                             rows, self.state.arch_preference.shows_x86()));

@@ -2414,6 +2414,7 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
     let backfill      = !state.asset_backfill_attempted
         && state.available.iter().any(|r| r.needs_asset_backfill());
     let slot          = state.slots.available.clone();
+    let was_backfill  = state.slots.fetch_was_backfill.clone();
     let partial_slot  = state.slots.partial_releases.clone();
     let token         = state.github_token.clone();
     // The fetch runs on the runtime, so it needs its own handle to log
@@ -2454,12 +2455,18 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     .map(|a| (Some(a.browser_download_url.clone()), Some(a.size)))
                     .unwrap_or((None, None));
                 let chromium_version = parse_chromium_version(&r.name);
-                let _ = verdict::upsert_tag_metadata(
-                    &r.tag,
-                    chromium_version.as_deref(),
-                    Some(&r.published_at),
-                    Some(&channel),
-                );
+                // Gated like the release_cache write: this runs over
+                // the *cumulative* list every page, so leaving it
+                // unconditional kept the O(pages^2) write cost the delta
+                // fix was meant to remove.
+                if persist {
+                    let _ = verdict::upsert_tag_metadata(
+                        &r.tag,
+                        chromium_version.as_deref(),
+                        Some(&r.published_at),
+                        Some(&channel),
+                    );
+                }
                 let mut row = ReleaseRow {
                     tag: r.tag,
                     published_at: r.published_at,
@@ -2518,7 +2525,14 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     let rows = to_rows(partial, &dl_idx, false);
                     for r in rows.iter().skip(persisted) {
                         if let Ok(json) = serde_json::to_string(r) {
-                            let _ = verdict::upsert_release_cache_row(&r.tag, &json);
+                            // complete=false: durable and visible, but
+                            // not yet authoritative for the known-tag
+                            // short-circuit — a walk that dies partway
+                            // otherwise leaves a newest-first prefix
+                            // that stops every later walk on page 1 and
+                            // makes the rest of the window unreachable.
+                            let _ = verdict::upsert_release_cache_row_with(
+                                &r.tag, &json, false);
                         }
                     }
                     persisted = rows.len();
@@ -2533,7 +2547,14 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     let rows = to_rows(partial, &dl_idx, false);
                     for r in rows.iter().skip(persisted) {
                         if let Ok(json) = serde_json::to_string(r) {
-                            let _ = verdict::upsert_release_cache_row(&r.tag, &json);
+                            // complete=false: durable and visible, but
+                            // not yet authoritative for the known-tag
+                            // short-circuit — a walk that dies partway
+                            // otherwise leaves a newest-first prefix
+                            // that stops every later walk on page 1 and
+                            // makes the rest of the window unreachable.
+                            let _ = verdict::upsert_release_cache_row_with(
+                                &r.tag, &json, false);
                         }
                     }
                     persisted = rows.len();
@@ -2542,6 +2563,13 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                 .map(|rs| to_rows(rs, &dl_idx, true))
                 .map_err(|e| format!("{e:#}"))
         };
+        // A finished walk promotes its partial rows, and reports whether
+        // it was the backfill walk so the one-shot flag is spent only on
+        // one that actually bypassed the short-circuit.
+        if result.is_ok() {
+            let _ = verdict::mark_release_cache_complete();
+        }
+        *was_backfill.lock().unwrap() = result.is_ok() && backfill;
         *slot.lock().unwrap() = Some(result);
     });
 }
