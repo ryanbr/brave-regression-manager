@@ -936,195 +936,255 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let notes_by_tag    = verdict::all_notes();
     // Fill remaining vertical space so a tall window doesn't show a big
     // empty band below this panel.
+    // Bump every text style up by 1px inside the Available list. Use
+    // `style_mut()` so Arc::make_mut COW-clones the shared Style and
+    // the change actually applies to subsequent child UIs (rows).
+    let rows = state.available.clone();
+    let installing_now = state.installing.clone();
+    if rows.is_empty() && !state.fetching_releases {
+        if state.loading_startup_cache {
+            super::app::weak_label(ui, "(loading cache from disk…)");
+        } else {
+            super::app::weak_label(ui, "(click \"Fetch GitHub releases\" to populate)");
+        }
+    }
+    // Compute how many rows actually clear the active filters and the
+    // oldest cached release date — used for the helpful empty-results
+    // message below when filters hide everything.
+    let mut shown = 0usize;
+    let mut oldest: Option<&str> = None;
+    // Client-side channel filter — needed because incremental cache
+    // mode pulls all channels from GitHub regardless of the user's
+    // checkbox selection. Manually-added tags (via the Add-by-tag
+    // flow) are exempted: when the user explicitly pulled v1.85.99
+    // they expect to see it even if only Nightly is ticked. Capture
+    // flags + the manual-set as locals so the helper doesn't keep
+    // an immutable borrow on `state` across the row loop's mutable
+    // uses.
+    let (ch_release, ch_beta, ch_nightly) =
+        (state.channel_release, state.channel_beta, state.channel_nightly);
+    let manual_tags = state.manual_release_tags.clone();
+    let pass_channel = move |r: &super::state::ReleaseRow| -> bool {
+        if manual_tags.contains(&r.tag) { return true; }
+        match r.channel.as_str() {
+            "Release" => ch_release,
+            "Beta"    => ch_beta,
+            "Nightly" => ch_nightly,
+            _ => true, // unknown channel — don't hide
+        }
+    };
+    for r in rows.iter() {
+        if let Some(o) = oldest {
+            if r.published_at.as_str() < o { oldest = Some(&r.published_at); }
+        } else {
+            oldest = Some(&r.published_at);
+        }
+        let pass_installer = !(state.hide_no_installer && r.host_asset.is_none());
+        // Manual tags bypass the date filter when the entry list is
+        // built, so they must bypass it in this count too. Otherwise a
+        // list of only out-of-range manual tags reports "0 of N match"
+        // and suppresses the header — while rendering those rows below
+        // it, headerless and with no reachable sort controls.
+        let pass_date      = state.manual_release_tags.contains(&r.tag)
+            || date_in_range(&r.published_at, state.date_from, state.date_to);
+        if pass_installer && pass_date && pass_channel(r) { shown += 1; }
+    }
+    if !rows.is_empty() && shown == 0 {
+        let oldest_short = oldest.map(short_date).unwrap_or_default();
+        let date_filter_active = state.date_from.is_some() || state.date_to.is_some();
+        ui.horizontal(|ui| {
+            if date_filter_active {
+                ui.colored_label(Color32::from_rgb(220, 180, 60), format!(
+                    "0 of {} releases match the date filter. Cache only goes back to {}.",
+                    rows.len(), oldest_short));
+                // Actionable button — kicks off a fetch back to the
+                // user's requested date_from in one click. Beats the
+                // old "go to Settings → bump count → re-fetch" prose.
+                if !state.fetching_releases
+                    && ui.button("Fetch back to date range").clicked()
+                {
+                    spawn_fetch(state);
+                }
+            } else {
+                ui.colored_label(Color32::from_rgb(220, 180, 60), format!(
+                    "0 of {} releases pass the current filters.", rows.len()));
+            }
+        });
+    }
+    // Fixed column widths so each row aligns vertically — looks much
+    // tidier than ui.horizontal where every cell sizes itself. Header
+    // uses the same widths so columns line up under their titles.
+    const COL_TAG:      f32 = 100.0;
+    const COL_DATE:     f32 =  80.0;
+    const COL_CHANNEL:  f32 =  76.0;
+    const COL_VERDICT:  f32 =  50.0;
+    const COL_NOTE:     f32 =  44.0;
+    // Status/action is fixed-width so the trailing Comments cell
+    // shares a common left edge across rows. Tight enough that
+    // "installed" rows don't leave a huge empty band; the asset
+    // filename uses Label::truncate(true) to clip-with-ellipsis
+    // so longer names don't push past this cap (full name still
+    // available on hover).
+    const COL_STATUS:   f32 = 260.0;
+
+    // Header row (only when there's data to show). Each title is
+    // clickable: first click sorts by that column, repeat clicks
+    // toggle ascending / descending. The active column shows ▲/▼.
+    if shown > 0 {
+        // Bump the column-header text +1pt over body so the row
+        // reads as a header even at quick glance — matching the
+        // Installed-versions panel's heading-size convention.
+        //
+        // +2 because the header used to be drawn inside the list, whose
+        // scope had already bumped every text style by 1px; now that it
+        // sits above the scroll area it has to carry both, or header and
+        // body render identically and the row stops reading as a header.
+        let header_size =
+            egui::TextStyle::Body.resolve(ui.style()).size + 2.0;
+        ui.horizontal(|ui| {
+            let mut header = |ui: &mut Ui, w: f32, text: &str,
+                              col: super::state::AvailSortColumn|
+            {
+                ui.scope(|ui| {
+                    ui.set_min_width(w);
+                    ui.set_max_width(w);
+                    let active = state.avail_sort_by == col;
+                    let arrow = if !active { "" }
+                        else if state.avail_sort_asc { " ^" } else { " v" };
+                    let color = if active { Color32::from_rgb(220, 200, 100) }
+                                else      { Color32::from_gray(160) };
+                    let label = egui::Label::new(
+                        RichText::new(format!("{text}{arrow}"))
+                            .strong().size(header_size).color(color)
+                    ).sense(egui::Sense::click());
+                    if ui.add(label)
+                        .on_hover_text(if active {
+                            format!("Click to {} order", if state.avail_sort_asc { "descend" } else { "ascend" })
+                        } else {
+                            format!("Sort by {text}")
+                        })
+                        .clicked()
+                    {
+                        if active {
+                            state.avail_sort_asc = !state.avail_sort_asc;
+                        } else {
+                            state.avail_sort_by  = col;
+                            // Default direction per column: dates and
+                            // verdicts feel right newest/strongest-first
+                            // (descending), text fields ascend by default.
+                            state.avail_sort_asc = matches!(col,
+                                super::state::AvailSortColumn::Tag
+                              | super::state::AvailSortColumn::Channel
+                              | super::state::AvailSortColumn::Note);
+                        }
+                    }
+                });
+            };
+            use super::state::AvailSortColumn as C;
+            header(ui, COL_TAG,     "Tag",     C::Tag);
+            header(ui, COL_DATE,    "Date",    C::Date);
+            header(ui, COL_CHANNEL, "Channel", C::Channel);
+            header(ui, COL_VERDICT, "Verdict", C::Verdict);
+            header(ui, COL_NOTE,    "Note",    C::Note);
+            ui.scope(|ui| {
+                ui.set_min_width(COL_STATUS);
+                ui.set_max_width(COL_STATUS);
+                ui.label(RichText::new("Status / action").strong()
+                    .size(header_size).color(Color32::from_gray(160)));
+            });
+            ui.label(RichText::new("Comments").strong()
+                .size(header_size).color(Color32::from_gray(160)));
+        });
+        ui.separator();
+    }
+
+    // Apply the active sort to a fresh row order. Sorting happens on
+    // the rendered slice only — the cached `state.available` keeps
+    // GitHub's published order so a re-fetch isn't needed. Then
+    // promote manually-added tags to the top so they're easy to
+    // find regardless of the user's current sort key, with a
+    // separator drawn between the manual block and the rest.
+    // Index-based sort so we don't have to deep-clone the row Vec
+    // out of the Arc snapshot. Sorting 4000 usizes is essentially
+    // free vs cloning 4000 ReleaseRow structs (each with several
+    // Strings inside).
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    sort_available_indices(&mut order, &rows, state.avail_sort_by,
+        state.avail_sort_asc, &verdicts_by_tag, &notes_by_tag);
+    order.sort_by_key(|&i| !state.manual_release_tags.contains(&rows[i].tag));
+
+    // Manually-added tags also bypass the date filter — if the user
+    // explicitly asked for v1.46.66 they shouldn't have to widen
+    // their date range to see it. Channel filter is already bypassed
+    // by `pass_channel`'s manual-tag check.
+
+    // Filtering moves OUT of the draw loop. `show_rows` needs `entries`
+    // to be exactly what it will draw, and the old in-loop `continue`s
+    // meant every row had to be visited — and laid out — just to find
+    // out it was hidden.
+    let mut entries: Vec<AvailEntry> = Vec::with_capacity(order.len());
+    let mut last_was_manual = false;
+    let mut first = true;
+    for &i in &order {
+        let r = &rows[i];
+        let is_manual = state.manual_release_tags.contains(&r.tag);
+        if state.hide_no_installer && r.host_asset.is_none() { continue; }
+        if !is_manual && !date_in_range(&r.published_at, state.date_from, state.date_to) { continue; }
+        if !pass_channel(r) { continue; }
+        // The manual/fetched separator becomes its own entry so every
+        // slot is one row tall — the uniform-height contract show_rows
+        // depends on, and the one the Console broke by letting a
+        // wrapped line overflow its budget.
+        if !first && last_was_manual && !is_manual {
+            entries.push(AvailEntry::Separator);
+        }
+        last_was_manual = is_manual;
+        first = false;
+        entries.push(AvailEntry::Row(i));
+    }
+
+    // Rows carry buttons and combo boxes, so the slot is interact_size
+    // tall, not text height. The +1.0 mirrors the text-style bump the
+    // list applies to itself below.
+    //
+    // Deliberately WITHOUT item_spacing: the parameter is
+    // `row_height_sans_spacing` and show_rows adds the spacing itself
+    // (egui 0.27.2 scroll_area.rs:697). Adding it here budgeted an
+    // extra spacing per slot, which both left an unfillable band at the
+    // bottom of the viewport and made the scroll extent overshoot the
+    // content by item_spacing * n.
+    let row_h = ui.spacing().interact_size.y
+        .max(ui.text_style_height(&egui::TextStyle::Body) + 1.0);
+
     egui::ScrollArea::vertical().id_source("avail")
-        .auto_shrink([false; 2]).show(ui, |ui|
+        .auto_shrink([false; 2])
+        .show_rows(ui, row_h, entries.len(), |ui, range|
     {
-        // Bump every text style up by 1px inside the Available list. Use
-        // `style_mut()` so Arc::make_mut COW-clones the shared Style and
-        // the change actually applies to subsequent child UIs (rows).
         for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
             font_id.size += 1.0;
         }
-        let rows = state.available.clone();
-        let installing_now = state.installing.clone();
-        if rows.is_empty() && !state.fetching_releases {
-            if state.loading_startup_cache {
-                super::app::weak_label(ui, "(loading cache from disk…)");
-            } else {
-                super::app::weak_label(ui, "(click \"Fetch GitHub releases\" to populate)");
-            }
-        }
-        // Compute how many rows actually clear the active filters and the
-        // oldest cached release date — used for the helpful empty-results
-        // message below when filters hide everything.
-        let mut shown = 0usize;
-        let mut oldest: Option<&str> = None;
-        // Client-side channel filter — needed because incremental cache
-        // mode pulls all channels from GitHub regardless of the user's
-        // checkbox selection. Manually-added tags (via the Add-by-tag
-        // flow) are exempted: when the user explicitly pulled v1.85.99
-        // they expect to see it even if only Nightly is ticked. Capture
-        // flags + the manual-set as locals so the helper doesn't keep
-        // an immutable borrow on `state` across the row loop's mutable
-        // uses.
-        let (ch_release, ch_beta, ch_nightly) =
-            (state.channel_release, state.channel_beta, state.channel_nightly);
-        let manual_tags = state.manual_release_tags.clone();
-        let pass_channel = move |r: &super::state::ReleaseRow| -> bool {
-            if manual_tags.contains(&r.tag) { return true; }
-            match r.channel.as_str() {
-                "Release" => ch_release,
-                "Beta"    => ch_beta,
-                "Nightly" => ch_nightly,
-                _ => true, // unknown channel — don't hide
-            }
-        };
-        for r in rows.iter() {
-            if let Some(o) = oldest {
-                if r.published_at.as_str() < o { oldest = Some(&r.published_at); }
-            } else {
-                oldest = Some(&r.published_at);
-            }
-            let pass_installer = !(state.hide_no_installer && r.host_asset.is_none());
-            let pass_date      = date_in_range(&r.published_at, state.date_from, state.date_to);
-            if pass_installer && pass_date && pass_channel(r) { shown += 1; }
-        }
-        if !rows.is_empty() && shown == 0 {
-            let oldest_short = oldest.map(short_date).unwrap_or_default();
-            let date_filter_active = state.date_from.is_some() || state.date_to.is_some();
-            ui.horizontal(|ui| {
-                if date_filter_active {
-                    ui.colored_label(Color32::from_rgb(220, 180, 60), format!(
-                        "0 of {} releases match the date filter. Cache only goes back to {}.",
-                        rows.len(), oldest_short));
-                    // Actionable button — kicks off a fetch back to the
-                    // user's requested date_from in one click. Beats the
-                    // old "go to Settings → bump count → re-fetch" prose.
-                    if !state.fetching_releases
-                        && ui.button("Fetch back to date range").clicked()
-                    {
-                        spawn_fetch(state);
-                    }
-                } else {
-                    ui.colored_label(Color32::from_rgb(220, 180, 60), format!(
-                        "0 of {} releases pass the current filters.", rows.len()));
-                }
-            });
-        }
-        // Fixed column widths so each row aligns vertically — looks much
-        // tidier than ui.horizontal where every cell sizes itself. Header
-        // uses the same widths so columns line up under their titles.
-        const COL_TAG:      f32 = 100.0;
-        const COL_DATE:     f32 =  80.0;
-        const COL_CHANNEL:  f32 =  76.0;
-        const COL_VERDICT:  f32 =  50.0;
-        const COL_NOTE:     f32 =  44.0;
-        // Status/action is fixed-width so the trailing Comments cell
-        // shares a common left edge across rows. Tight enough that
-        // "installed" rows don't leave a huge empty band; the asset
-        // filename uses Label::truncate(true) to clip-with-ellipsis
-        // so longer names don't push past this cap (full name still
-        // available on hover).
-        const COL_STATUS:   f32 = 260.0;
-
-        // Header row (only when there's data to show). Each title is
-        // clickable: first click sorts by that column, repeat clicks
-        // toggle ascending / descending. The active column shows ▲/▼.
-        if shown > 0 {
-            // Bump the column-header text +1pt over body so the row
-            // reads as a header even at quick glance — matching the
-            // Installed-versions panel's heading-size convention.
-            let header_size =
-                egui::TextStyle::Body.resolve(ui.style()).size + 1.0;
-            ui.horizontal(|ui| {
-                let mut header = |ui: &mut Ui, w: f32, text: &str,
-                                  col: super::state::AvailSortColumn|
-                {
+        for entry in &entries[range] {
+            let row_idx = match entry {
+                AvailEntry::Separator => {
+                    // Padded to a full slot so it cannot under-fill and
+                    // drag later rows out of step with the scrollbar.
                     ui.scope(|ui| {
-                        ui.set_min_width(w);
-                        ui.set_max_width(w);
-                        let active = state.avail_sort_by == col;
-                        let arrow = if !active { "" }
-                            else if state.avail_sort_asc { " ^" } else { " v" };
-                        let color = if active { Color32::from_rgb(220, 200, 100) }
-                                    else      { Color32::from_gray(160) };
-                        let label = egui::Label::new(
-                            RichText::new(format!("{text}{arrow}"))
-                                .strong().size(header_size).color(color)
-                        ).sense(egui::Sense::click());
-                        if ui.add(label)
-                            .on_hover_text(if active {
-                                format!("Click to {} order", if state.avail_sort_asc { "descend" } else { "ascend" })
-                            } else {
-                                format!("Sort by {text}")
-                            })
-                            .clicked()
-                        {
-                            if active {
-                                state.avail_sort_asc = !state.avail_sort_asc;
-                            } else {
-                                state.avail_sort_by  = col;
-                                // Default direction per column: dates and
-                                // verdicts feel right newest/strongest-first
-                                // (descending), text fields ascend by default.
-                                state.avail_sort_asc = matches!(col,
-                                    super::state::AvailSortColumn::Tag
-                                  | super::state::AvailSortColumn::Channel
-                                  | super::state::AvailSortColumn::Note);
-                            }
-                        }
+                        ui.set_min_height(row_h);
+                        ui.separator();
                     });
-                };
-                use super::state::AvailSortColumn as C;
-                header(ui, COL_TAG,     "Tag",     C::Tag);
-                header(ui, COL_DATE,    "Date",    C::Date);
-                header(ui, COL_CHANNEL, "Channel", C::Channel);
-                header(ui, COL_VERDICT, "Verdict", C::Verdict);
-                header(ui, COL_NOTE,    "Note",    C::Note);
-                ui.scope(|ui| {
-                    ui.set_min_width(COL_STATUS);
-                    ui.set_max_width(COL_STATUS);
-                    ui.label(RichText::new("Status / action").strong()
-                        .size(header_size).color(Color32::from_gray(160)));
-                });
-                ui.label(RichText::new("Comments").strong()
-                    .size(header_size).color(Color32::from_gray(160)));
-            });
-            ui.separator();
-        }
-
-        // Apply the active sort to a fresh row order. Sorting happens on
-        // the rendered slice only — the cached `state.available` keeps
-        // GitHub's published order so a re-fetch isn't needed. Then
-        // promote manually-added tags to the top so they're easy to
-        // find regardless of the user's current sort key, with a
-        // separator drawn between the manual block and the rest.
-        // Index-based sort so we don't have to deep-clone the row Vec
-        // out of the Arc snapshot. Sorting 4000 usizes is essentially
-        // free vs cloning 4000 ReleaseRow structs (each with several
-        // Strings inside).
-        let mut order: Vec<usize> = (0..rows.len()).collect();
-        sort_available_indices(&mut order, &rows, state.avail_sort_by,
-            state.avail_sort_asc, &verdicts_by_tag, &notes_by_tag);
-        order.sort_by_key(|&i| !state.manual_release_tags.contains(&rows[i].tag));
-
-        // Manually-added tags also bypass the date filter — if the user
-        // explicitly asked for v1.46.66 they shouldn't have to widen
-        // their date range to see it. Channel filter is already bypassed
-        // by `pass_channel`'s manual-tag check.
-        let mut last_was_manual = false;
-        for &row_idx in &order {
+                    continue;
+                }
+                AvailEntry::Row(i) => *i,
+            };
             let r = &rows[row_idx];
             let is_manual = state.manual_release_tags.contains(&r.tag);
-            if state.hide_no_installer && r.host_asset.is_none() { continue; }
-            if !is_manual && !date_in_range(&r.published_at, state.date_from, state.date_to) { continue; }
-            if !pass_channel(r) { continue; }
-            // Draw a separator the moment we transition from the manual
-            // block to the regular fetched block.
-            if last_was_manual && !is_manual {
-                ui.separator();
-            }
-            last_was_manual = is_manual;
+            // show_rows' auto-id skip assumes one widget per row. These
+            // rows use several, and a variable number — an uninstalled
+            // row adds an Install button, a manual one a Remove button —
+            // so without an explicit id a button's identity shifts when
+            // the first visible row changes. Press Install, scroll
+            // before releasing, and the click is silently dropped.
+            ui.push_id(row_idx, |ui| {
             ui.horizontal(|ui| {
                 // Reserve a fixed-width cell, then place the widget inside.
                 // `scope` lets us set a min_size without bleeding into the
@@ -1342,6 +1402,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     });
                 }
             });
+            });   // push_id(row_idx)
         }
     });
 
@@ -1466,6 +1527,19 @@ fn render_regression_report_window(ui: &mut Ui, state: &mut AppState) {
     if !open || close_after {
         state.regression_report_open = false;
     }
+}
+
+/// One slot in the virtualised Available list.
+///
+/// `ScrollArea::show_rows` addresses rows by index and budgets a fixed
+/// height for each, so anything drawn between rows has to be a row
+/// itself — hence the separator variant rather than an inline
+/// `ui.separator()` inside the draw loop.
+enum AvailEntry {
+    /// Divider between the manually-added block and the fetched rows.
+    Separator,
+    /// Index into the `state.available` snapshot.
+    Row(usize),
 }
 
 /// Renders the Status / action cell for one Available row. Pulled out of
