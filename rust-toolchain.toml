@@ -1,0 +1,14 @@
+# Pin the toolchain so a local check and CI cannot disagree.
+#
+# They did: local was 1.94 while `dtolnay/rust-toolchain@stable` in CI
+# resolved to 1.98, where clippy's `for_kv_map` fires on the
+# `for (_, v) in map.iter_mut()` idiom this GUI uses. Eight sites passed
+# every local `clippy -D warnings` run and failed the first CI build,
+# so "zero warnings" was true of one toolchain and not the other.
+#
+# Bump deliberately, and run `cargo clippy --all-targets -- -D warnings`
+# when you do — a newer stable adds lints, and this file is what makes
+# that a decision rather than a surprise on a release tag.
+[toolchain]
+channel    = "1.98.0"
+components = ["clippy", "rustfmt"]

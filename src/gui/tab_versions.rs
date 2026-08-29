@@ -37,7 +37,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // than the rest of the page. style_mut() COW-clones the parent's
     // style so the change only applies to this scope.
     ui.horizontal_wrapped(|ui| {
-        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+        for font_id in ui.style_mut().text_styles.values_mut() {
             font_id.size += 3.0;
         }
         if ui.button("Refresh installed")
@@ -84,7 +84,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Row 2: filters (hide + date range) ────────────────────────────────
     ui.horizontal_wrapped(|ui| {
-        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+        for font_id in ui.style_mut().text_styles.values_mut() {
             font_id.size += 3.0;
         }
         let mut hide = state.hide_no_installer;
@@ -319,7 +319,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // Bump every text style up by 1px inside the installed panel only —
         // gives the row labels / monospace tags a touch more legibility
         // without growing the rest of the tab.
-        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+        for font_id in ui.style_mut().text_styles.values_mut() {
             font_id.size += 1.0;
         }
         let installed = state.installed.clone();
@@ -885,7 +885,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // Bump every text style by +1 px in this row only — pulls the
         // Add-by-tag label / TextEdit / [Add] button out a touch from
         // the surrounding small-button noise so it's easier to find.
-        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+        for font_id in ui.style_mut().text_styles.values_mut() {
             font_id.size += 1.0;
         }
         super::app::weak_label(ui, "Add release by tag:")
@@ -945,7 +945,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // the column header was compensated at the time and these were
         // missed. Same bump, applied locally.
         ui.scope(|ui| {
-            for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+            for font_id in ui.style_mut().text_styles.values_mut() {
                 font_id.size += 1.0;
             }
             if state.loading_startup_cache {
@@ -1002,7 +1002,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         ui.horizontal(|ui| {
             // Also lost the list's +1 when this moved above the scroll
             // area — see the empty-state hints above.
-            for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+            for font_id in ui.style_mut().text_styles.values_mut() {
                 font_id.size += 1.0;
             }
             if date_filter_active {
@@ -1172,7 +1172,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .auto_shrink([false; 2])
         .show_rows(ui, row_h, entries.len(), |ui, range|
     {
-        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+        for font_id in ui.style_mut().text_styles.values_mut() {
             font_id.size += 1.0;
         }
         for entry in &entries[range] {
@@ -1826,7 +1826,7 @@ fn render_compare_section(
                      (r.chromium_version.clone(), r.published_at.clone())))
             .collect();
     ui.allocate_ui(ui.available_size(), |ui| {
-        for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+        for font_id in ui.style_mut().text_styles.values_mut() {
             font_id.size += 3.0;
         }
         for (channel, older, newer, good, bad) in &brackets {
