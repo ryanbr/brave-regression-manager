@@ -22,19 +22,35 @@ pub struct Entry {
 pub struct ConsoleLog {
     entries:  VecDeque<Entry>,
     capacity: usize,
+    /// Widest `source + msg` ever pushed, in chars, for the panel's
+    /// horizontal scroll extent. That extent has to be stable across
+    /// frames: `ScrollArea::show_rows` only paints the visible subset,
+    /// so if those rows defined the content width it would collapse
+    /// whenever the viewport sat on short lines — egui clamps the
+    /// scroll offset to `content - viewport` every frame, snapping the
+    /// user back to column 0 mid-read. Grows only; a ring eviction can
+    /// leave it wider than the widest surviving line, which costs a
+    /// little dead scroll range and nothing else.
+    max_line_chars: usize,
 }
 
 impl ConsoleLog {
     pub fn new(capacity: usize) -> Self {
-        Self { entries: VecDeque::with_capacity(capacity), capacity }
+        Self { entries: VecDeque::with_capacity(capacity), capacity,
+               max_line_chars: 0 }
     }
     pub fn push(&mut self, e: Entry) {
         if self.entries.len() == self.capacity { self.entries.pop_front(); }
+        self.max_line_chars = self.max_line_chars
+            .max(e.source.chars().count() + e.msg.chars().count());
         self.entries.push_back(e);
     }
     pub fn entries(&self) -> impl Iterator<Item = &Entry> { self.entries.iter() }
     pub fn len(&self)   -> usize { self.entries.len() }
-    pub fn clear(&mut self)      { self.entries.clear(); }
+    pub fn clear(&mut self)      { self.entries.clear(); self.max_line_chars = 0; }
+    /// Widest `source + msg` seen since the last `clear()`, in chars.
+    /// The panel adds its own fixed prefix width on top.
+    pub fn max_line_chars(&self) -> usize { self.max_line_chars }
     /// O(1) index access by oldest-first position. Used by the
     /// Console panel's viewport-rendered ScrollArea so we can
     /// paint only the on-screen rows instead of laying out every

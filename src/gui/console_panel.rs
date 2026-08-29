@@ -73,7 +73,16 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // blank while the scrollbar still claimed 1000 rows. Lock duration
     // is bounded by the closure (sync rendering); nothing inside it
     // pushes to the Console, so there is no re-entrancy.
-    let Ok(g) = state.console.lock() else { return };
+    // A poisoned mutex must still say so: before this was a single
+    // lock the `unwrap_or(0)` fell through to the "(no console output
+    // yet)" label, and a bare `return` here would instead paint an
+    // unexplained empty tab. `console::push` swallows poison too, so
+    // logging is silently dead for the rest of the session — that is
+    // worth a visible marker rather than a blank panel.
+    let Ok(g) = state.console.lock() else {
+        super::app::weak_label(ui, "(console unavailable — internal lock poisoned)");
+        return;
+    };
     let total = g.len();
     if total == 0 {
         super::app::weak_label(ui, "(no console output yet)");
@@ -90,10 +99,27 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // wider than the window (asset URLs, raw Brave stderr), so extend
     // rather than wrap, and give the area a horizontal scrollbar so
     // the overflow is still reachable.
+    //
+    // That scrollbar needs a content width that does NOT depend on
+    // which rows happen to be on screen. egui derives content size from
+    // what the closure actually painted and re-clamps the scroll offset
+    // to it every frame, so with `show_rows` the horizontal extent
+    // would collapse the moment the viewport moved onto short lines —
+    // yanking the view back to column 0 while the user was reading a
+    // long URL, and resizing the scrollbar handle each frame. The ring
+    // tracks the widest line it has ever held, which gives a stable
+    // extent for the cost of one `max` per push.
+    let char_w = ui.fonts(|f| f.glyph_width(
+        &egui::TextStyle::Monospace.resolve(ui.style()), ' '));
+    // "HH:MM:SS" + 2 + "LEVEL" + 2 + "[" + "]" + 2 = 21 fixed chars
+    // around the per-entry `source` + `msg` the ring measured.
+    const PREFIX_CHARS: usize = 21;
+    let content_w = (g.max_line_chars() + PREFIX_CHARS) as f32 * char_w;
     egui::ScrollArea::both()
         .auto_shrink([false; 2])
         .stick_to_bottom(true)
         .show_rows(ui, row_h, total, |ui, range| {
+            ui.set_min_width(content_w);
             for i in range {
                 let Some(e) = g.get(i) else { continue };
                 let (color, prefix) = match e.level {

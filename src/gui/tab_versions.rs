@@ -2902,21 +2902,30 @@ pub(super) fn launch_failure_hint(raw: &str) -> Option<&'static str> {
 /// cache where the OLD Windows picker selected an arm64 zip on an x64
 /// host. Conservative: only flags names with explicit arm markers.
 ///
-/// One direction only. An ARM PE will not load on x64 (the loader
-/// fails with ERROR_EXE_MACHINE_TYPE_MISMATCH), so an arm64 asset on
-/// an x64 host really is unusable. The reverse is not: Windows 11 on
-/// ARM emulates x64, and `github::pick_for_host` *deliberately* ends
-/// its ARM-host order with the x64 zip for the tags where Brave
-/// shipped no arm64 build. Flagging those would hard-disable Install
-/// on exactly the rows that fallback exists to serve — and the
-/// disabled hint ("refresh the cache") cannot help, because a refresh
-/// re-picks the same x64 asset. Before the native
-/// aarch64-pc-windows-msvc build shipped, ARM users ran the x64
-/// binary, so `consts::ARCH` was "x86_64" and this never fired.
+/// An ARM binary will not load on an x64 host — the Windows loader
+/// fails with ERROR_EXE_MACHINE_TYPE_MISMATCH, Linux with "Exec format
+/// error" — so an arm asset on an x64 host is always worth blocking.
+///
+/// The reverse depends on the platform, so it cannot be a blanket rule:
+/// every `pick_for_host` ARM-host order *deliberately* ends with the
+/// x64 asset for tags where Brave shipped no arm build, but only
+/// Windows 11 on ARM (x64 emulation) and macOS (Rosetta 2) can actually
+/// run what that fallback selects. ARM **Linux** cannot, and its order
+/// still ends with `zip_x64` (github.rs), so an x64 asset stays flagged
+/// there — otherwise Install would be enabled for a ~150 MB download
+/// that dies with "Exec format error" on launch.
+///
+/// Before the native aarch64-pc-windows-msvc build shipped, ARM Windows
+/// users ran the x64 binary, so `consts::ARCH` read "x86_64" and the
+/// ARM-host branch never fired for them at all.
 fn is_opposite_arch_asset(asset_name: &str) -> bool {
-    if std::env::consts::ARCH == "aarch64" { return false; }
     let l = asset_name.to_lowercase();
-    l.contains("arm64") || l.contains("aarch64") || l.contains("-arm")
+    let asset_arm = l.contains("arm64") || l.contains("aarch64") || l.contains("-arm");
+    if std::env::consts::ARCH == "aarch64" {
+        let asset_x64 = (l.contains("x64") || l.contains("amd64")) && !asset_arm;
+        return asset_x64 && !cfg!(any(windows, target_os = "macos"));
+    }
+    asset_arm
 }
 
 /// Wipe every file in `cache/downloads/` AND `cache/extracted/`.
