@@ -514,6 +514,61 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                 }
                 ui.end_row();
 
+                // Only an ARM host with an emulation layer has a choice
+                // to make: Windows 11 on ARM emulates x64 and macOS has
+                // Rosetta 2. On x64 there is no alternative build, and
+                // ARM Linux can't run one, so the row would be inert.
+                if std::env::consts::ARCH == "aarch64"
+                    && cfg!(any(windows, target_os = "macos"))
+                {
+                    ui.label("Build architecture:").on_hover_text(
+                        "Which Brave builds this ARM machine offers. \
+                         Native only lists the ARM build, and a release \
+                         that shipped no ARM asset shows no installer. \
+                         Native + x86-64 additionally lists every release \
+                         that ships an x86-64 asset as its own [x86] row, \
+                         run under emulation.\n\nBoth can be installed at \
+                         once and carry separate verdicts: which build is \
+                         running is itself a variable when bisecting, so a \
+                         regression may reproduce under emulation and not \
+                         natively. The [x86] build installs alongside the \
+                         native one rather than replacing it.");
+                    let before = state.arch_preference;
+                    egui::ComboBox::from_id_source("arch_pref")
+                        .selected_text(state.arch_preference.label())
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            for p in crate::config::ArchPreference::ALL {
+                                ui.selectable_value(
+                                    &mut state.arch_preference, p, p.label());
+                            }
+                        });
+                    if state.arch_preference != before {
+                        state.config_dirty = true;
+                        // The [x86] rows are derived, so re-expanding
+                        // from the stored asset lists is the whole
+                        // update — no network, no cache rewrite. Strip
+                        // any existing variants first so toggling back
+                        // and forth can't accumulate duplicates.
+                        let base: Vec<_> = state.available.iter()
+                            .filter(|r| !r.x86_variant).cloned().collect();
+                        let stale = base.iter()
+                            .filter(|r| r.needs_asset_backfill()).count();
+                        let rows = super::super::state::expand_arch_rows(
+                            base, state.arch_preference.shows_x86());
+                        let shown = rows.iter().filter(|r| r.x86_variant).count();
+                        state.available = std::sync::Arc::new(rows);
+                        let tail = if stale > 0 {
+                            format!("; {stale} release(s) predate the stored \
+                                     asset list — re-fetch to include those")
+                        } else { String::new() };
+                        crate::console::info(&state.console, "config", format!(
+                            "arch_preference: {} ({shown} [x86] row(s){tail})",
+                            state.arch_preference.label()));
+                    }
+                    ui.end_row();
+                }
+
                 // Discoverable mirror of the Available header's
                 // Clear -> Remove Cached files action — same behaviour
                 // (wipes everything under <data-root>/cache/downloads/),

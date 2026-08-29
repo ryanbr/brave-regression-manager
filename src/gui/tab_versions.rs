@@ -246,17 +246,28 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // window. Each row is tagged with its channel from the available
     // cache (or "?" when unknown — those still pair with each other but
     // never cross with a known channel).
+    // Installed tags come from directory names, so an emulated install
+    // arrives as "<tag>+x86" — which matches no Available row and would
+    // bucket every such install into channel "", quietly preventing it
+    // from ever bracketing against a native one.
     let channel_of = |tag: &str| -> String {
-        state.available.iter().find(|r| r.tag == tag)
+        let base = super::state::ReleaseRow::base_tag(tag);
+        state.available.iter().find(|r| r.tag == base)
             .map(|r| r.channel.clone()).unwrap_or_default()
     };
     let mut goods: Vec<(usize, String, String)> = Vec::new(); // (idx, tag, channel)
     let mut bads:  Vec<(usize, String, String)> = Vec::new();
     for (i, tag) in sorted_tags.iter().enumerate() {
         let ch = channel_of(tag);
+        // The verdict is per-install, so it is read with the full key;
+        // the bracket endpoint is a brave-core ref, so it is recorded as
+        // the bare tag. Without the split, an emulated install put
+        // "<tag>+x86" into compare URLs, tag_metadata lookups and
+        // releases/tags fetches — all of which 404.
+        let base = super::state::ReleaseRow::base_tag(tag).to_string();
         match verdict::version_verdict(tag).unwrap_or(Verdict::Unknown) {
-            Verdict::Good => goods.push((i, tag.clone(), ch)),
-            Verdict::Bad  => bads.push((i, tag.clone(), ch)),
+            Verdict::Good => goods.push((i, base, ch)),
+            Verdict::Bad  => bads.push((i, base, ch)),
             // BUGGY / UNSURE / UNTESTED / Unknown don't anchor a bracket.
             // Only firm GOOD ↔ BAD pairs trigger the compare panel.
             _ => {}
@@ -1124,6 +1135,21 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     // tag/text colour we use (verdict greens/reds, the
                     // green asset-name label, the blue [cached] pill,
                     // the channel pill colours).
+                    // Outside the is_manual split: the native and
+                    // emulated rows are otherwise byte-identical — same
+                    // tag, date, channel and verdict — so without this
+                    // marker on EVERY row the two are indistinguishable
+                    // and a verdict lands on whichever one the user
+                    // guessed at.
+                    if r.x86_variant {
+                        ui.label(RichText::new("[x86]").monospace()
+                            .color(Color32::from_rgb(200, 150, 90)))
+                            .on_hover_text(
+                                "x86-64 build, run under emulation. \
+                                 Installs alongside the native ARM \
+                                 build of the same tag and keeps its \
+                                 own verdict, note and launch args.");
+                    }
                     if is_manual {
                         ui.label(RichText::new(&r.tag).monospace().strong()
                             .color(Color32::from_rgb(120, 220, 230)));
@@ -1145,7 +1171,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 fixed_cell(ui, COL_VERDICT, &mut |ui| {
-                    let row_verdict = verdicts_by_tag.get(&r.tag).copied().unwrap_or(Verdict::Unknown);
+                    let row_verdict = verdicts_by_tag.get(&r.install_key()).copied().unwrap_or(Verdict::Unknown);
                     if row_verdict != Verdict::Unknown {
                         ui.colored_label(verdict_color(row_verdict),
                             RichText::new(format!("[{}]", verdict_label(row_verdict))).strong());
@@ -1153,7 +1179,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 // Note cell — inline so it can mutate state when clicked.
-                let cur_note = notes_by_tag.get(&r.tag).cloned().unwrap_or_default();
+                let cur_note = notes_by_tag.get(&r.install_key()).cloned().unwrap_or_default();
                 ui.scope(|ui| {
                     ui.set_min_width(COL_NOTE);
                     ui.set_max_width(COL_NOTE);
@@ -1168,14 +1194,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .on_hover_text(hover)
                         .clicked()
                     {
-                        state.editing_note_tag = Some(r.tag.clone());
+                        state.editing_note_tag = Some(r.install_key());
                         state.editing_note_buf = cur_note.clone();
                         state.note_window_just_opened = true;
                     }
                 });
 
-                let installed = versions::is_installed(&r.tag);
-                let busy = installing_now.contains(&r.tag);
+                let installed = versions::is_installed(&r.install_key());
+                let busy = installing_now.contains(&r.install_key());
 
                 // Status/action cell. For manually-added rows, the
                 // Remove button is rendered inside the same fixed-width
@@ -1196,9 +1222,23 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             .clicked()
                         {
                             let tag = r.tag.clone();
-                            let dir = crate::paths::version_dir(&tag);
-                            let was_installed = dir.exists();
-                            let was_running   = state.running.contains_key(&tag);
+                            // Removing a manual tag drops BOTH its rows
+                            // from Available, so it has to uninstall both
+                            // builds — and each from its own directory.
+                            // Keying this on r.tag alone deleted
+                            // versions/<tag> no matter which row was
+                            // clicked, so Remove on the [x86] row wiped
+                            // the native install and orphaned the
+                            // emulated one with no row left to remove it.
+                            let keys: Vec<String> = [tag.clone(),
+                                                     format!("{tag}+x86")]
+                                .into_iter()
+                                .filter(|k| crate::paths::version_dir(k).exists()
+                                         || state.running.contains_key(k))
+                                .collect();
+                            let was_installed = !keys.is_empty();
+                            let was_running   = keys.iter()
+                                .any(|k| state.running.contains_key(k));
                             // Pre-action echo so the user sees what
                             // they're about to do (and we can later
                             // diagnose a failure mid-sequence).
@@ -1206,31 +1246,40 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                 "removing manual tag {tag} \
                                  (installed={was_installed}, running={was_running})"));
 
-                            if let Some(mut running) = state.running.remove(&tag) {
-                                let pid = running.child.id();
-                                versions::launch::force_kill_tree(pid);
-                                let _ = running.child.kill();
-                                let _ = running.child.wait();
-                                crate::console::info(&state.console, "manual",
-                                    format!("  • killed running Brave (pid {pid})"));
+                            for key in &keys {
+                                if let Some(mut running) = state.running.remove(key) {
+                                    let pid = running.child.id();
+                                    versions::launch::force_kill_tree(pid);
+                                    let _ = running.child.kill();
+                                    let _ = running.child.wait();
+                                    crate::console::info(&state.console, "manual",
+                                        format!("  • killed running Brave for {key} \
+                                                 (pid {pid})"));
+                                }
                             }
 
                             let mut uninstall_note = String::new();
-                            if was_installed {
-                                match std::fs::remove_dir_all(&dir) {
+                            let mut removed = 0usize;
+                            for key in &keys {
+                                let d = crate::paths::version_dir(key);
+                                if !d.exists() { continue; }
+                                match std::fs::remove_dir_all(&d) {
                                     Ok(()) => {
-                                        uninstall_note = " + uninstalled".to_string();
-                                        state.installed = std::sync::Arc::new(
-                                            versions::list_installed().unwrap_or_default());
+                                        removed += 1;
                                         crate::console::info(&state.console, "manual",
-                                            format!("  • uninstalled {}", dir.display()));
+                                            format!("  • uninstalled {}", d.display()));
                                     }
                                     Err(e) => {
                                         uninstall_note = format!(" (uninstall failed: {e})");
                                         crate::console::error(&state.console, "uninstall",
-                                            format!("{tag}: {e:#}"));
+                                            format!("{key}: {e:#}"));
                                     }
                                 }
+                            }
+                            if removed > 0 {
+                                uninstall_note = " + uninstalled".to_string();
+                                state.installed = std::sync::Arc::new(
+                                    versions::list_installed().unwrap_or_default());
                             }
                             state.manual_release_tags.remove(&tag);
                             std::sync::Arc::make_mut(&mut state.available)
@@ -1278,7 +1327,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             .on_hover_text(&cur_note)
                             .clicked()
                         {
-                            state.editing_note_tag = Some(r.tag.clone());
+                            state.editing_note_tag = Some(r.install_key());
                             state.editing_note_buf = cur_note.clone();
                             state.note_window_just_opened = true;
                         }
@@ -1436,7 +1485,7 @@ fn render_status_cell(
                             RichText::new(name).color(Color32::from_rgb(60, 200, 90)))
                             .truncate(true))
                             .on_hover_text(format!("Asset: {name}"));
-                        let progress = super::state::progress_for(&state.slots, &r.tag);
+                        let progress = super::state::progress_for(&state.slots, &r.install_key());
                         if let Some(p) = progress {
                             let txt = format_progress_text(&p);
                             ui.add(egui::ProgressBar::new(p.fraction())
@@ -1455,7 +1504,7 @@ fn render_status_cell(
                         }
                         let btn_label = if r.cached { "Install (cached)" } else { "Install" };
                         let arch_mismatch = is_opposite_arch_asset(name);
-                        let already_installing = installing_now.contains(&r.tag);
+                        let already_installing = installing_now.contains(&r.install_key());
                         let cap_reached = installing_now.len() >= install_cap;
                         let btn_resp = ui.add_enabled(
                             !already_installing && !cap_reached && !arch_mismatch,
@@ -1478,8 +1527,13 @@ fn render_status_cell(
                                 super::state::MAX_CONCURRENT_INSTALLS_TOKEN))
                         } else { btn_resp };
                         if btn_resp.clicked() {
-                            state.installing.insert(r.tag.clone());
-                            state.installing_started.insert(r.tag.clone(),
+                            // Install-shaped state: must match the key
+                            // the worker reports back under, or the
+                            // entry is never removed and the row stays
+                            // "installing…" — holding a concurrency slot
+                            // and a 100ms repaint — for the session.
+                            state.installing.insert(r.install_key());
+                            state.installing_started.insert(r.install_key(),
                                 std::time::Instant::now());
                             state.status_msg = format!("installing {}…", r.tag);
                             // Pre-install summary — confirms which asset is
@@ -1496,8 +1550,11 @@ fn render_status_cell(
                             // stale completed-state doesn't briefly
                             // flash before the new download writes its
                             // first sample. Other tags' entries stay.
-                            progress.lock().unwrap().remove(&r.tag);
-                            let tag2     = r.tag.clone();
+                            progress.lock().unwrap().remove(&r.install_key());
+                            // The install DIRECTORY and every per-install row keyed beside it.
+                            // Native keeps the bare tag, so existing
+                            // installs and their verdicts are untouched.
+                            let tag2     = r.install_key();
                             let name2    = name.clone();
                             let url      = r.asset_url.clone();
                             let size     = r.asset_size;
@@ -1979,6 +2036,9 @@ fn spawn_add_by_tag(state: &mut AppState, tag: String) {
                     tag: r.tag, published_at: r.published_at,
                     host_asset: r.host_asset, asset_url, asset_size,
                     skip_reason, cached: false, channel, chromium_version,
+                    assets: versions::github::installer_assets(&r.assets),
+                    pick_key: versions::github::current_pick_key(),
+                    x86_variant: false,
                 };
                 row.refresh_cached();
                 if let Ok(json) = serde_json::to_string(&row) {
@@ -2120,6 +2180,10 @@ fn collect_report_data(
     let verdicts_by_tag = verdict::all_version_verdicts();
     let mut others: Vec<(String, Verdict, String, String)> = Vec::new();
     for r in state.available.iter() {
+        // One entry per release. The [x86] row is the same brave-core
+        // commit range as its native twin, so listing both would pad the
+        // report with duplicate tags.
+        if r.x86_variant { continue; }
         if r.channel != channel { continue; }
         if r.tag == good || r.tag == bad { continue; }
         let v = verdicts_by_tag.get(&r.tag).copied().unwrap_or(Verdict::Unknown);
@@ -2319,24 +2383,13 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
     } else {
         format!("fetching {count} tags…")
     };
-    // Pre-fetch summary — confirms what we're about to walk and
-    // whether the request is going through anonymous (60 req/hr) or
-    // token-authenticated (5000 req/hr) GitHub API quota. Helps
-    // when troubleshooting slow / rate-limited fetches.
-    let chans_str = {
-        let mut v: Vec<&str> = Vec::new();
-        if state.channel_release { v.push("Release"); }
-        if state.channel_beta    { v.push("Beta"); }
-        if state.channel_nightly { v.push("Nightly"); }
-        if v.is_empty() { "Nightly".to_string() } else { v.join("+") }
-    };
-    let auth_str = if !state.github_token.is_empty() { "token (5000/hr)" }
-                   else                              { "anonymous (60/hr)" };
-    let stop_str = state.date_from.map(|d| format!("stop_at={d}"))
-        .unwrap_or_else(|| "no stop_at".to_string());
-    crate::console::info(&state.console, "github", format!(
-        "fetch start: count<={count}  channels={chans_str}  {stop_str}  \
-         auth={auth_str}"));
+    // The pre-fetch summary lives in `list_releases_streaming` now. The
+    // version that used to be here reported three things it could not
+    // know: the channel checkboxes (the filter passed below is
+    // hardcoded all-channels), `count` (which stop_at overrides), and an
+    // auth mode derived from the Settings token alone (blind to
+    // GITHUB_TOKEN). Two contradictory lines under one source is worse
+    // than none.
     // Snapshot the oldest cached release date so the async task can
     // decide whether incremental's known-tag short-circuit is safe to
     // apply (it isn't when the user is asking for something deeper
@@ -2345,9 +2398,20 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         .filter_map(|r| r.published_at.get(..10))
         .filter_map(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
         .min();
+    // Once per session, not once per row still lacking assets: the walk
+    // stops at `effective_target` while the sqlite cache holds thousands
+    // of tags, so rows older than the window keep an empty asset list
+    // and would re-trigger the bypass on every fetch — making each one a
+    // full deep re-walk, the opposite of "self-clearing".
+    let backfill      = !state.asset_backfill_attempted
+        && state.available.iter().any(|r| r.needs_asset_backfill());
+    if backfill { state.asset_backfill_attempted = true; }
     let slot          = state.slots.available.clone();
     let partial_slot  = state.slots.partial_releases.clone();
     let token         = state.github_token.clone();
+    // The fetch runs on the runtime, so it needs its own handle to log
+    // progress — everything it emits lands in the Console tab live.
+    let console       = state.console.clone();
     // When the user has set a `from` date, pass it as `stop_at` so the
     // fetcher halts once it has reached that date — saves API calls when
     // the user only cares about a recent date window.
@@ -2363,8 +2427,14 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         // Convert a Vec<github::Release> → Vec<ReleaseRow> for the GUI.
         // Always persists each row to sqlite `release_cache` so future
         // fetches can short-circuit on known tags.
+        // `persist` is false for the per-page progress callback: it is
+        // handed the *cumulative* list every page, so upserting there
+        // rewrote every row seen so far once per page — O(pages^2) row
+        // writes, each now carrying an asset list. The final result is
+        // persisted once instead.
         fn to_rows(rs: Vec<versions::github::Release>,
-                   dl_idx: &super::state::DownloadsIndex) -> Vec<ReleaseRow> {
+                   dl_idx: &super::state::DownloadsIndex,
+                   persist: bool) -> Vec<ReleaseRow> {
             rs.into_iter().map(|r| {
                 let skip_reason = r.skip_reason();
                 let channel = match versions::github::detect_release_channel(&r) {
@@ -2392,10 +2462,18 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     cached: false,
                     channel,
                     chromium_version,
+                    // Kept so a later run on a different CPU
+                    // architecture can redo the pick without a
+                    // network call.
+                    assets: versions::github::installer_assets(&r.assets),
+                    pick_key: versions::github::current_pick_key(),
+                    x86_variant: false,
                 };
                 row.refresh_cached_with(dl_idx);
-                if let Ok(json) = serde_json::to_string(&row) {
-                    let _ = verdict::upsert_release_cache_row(&row.tag, &json);
+                if persist {
+                    if let Ok(json) = serde_json::to_string(&row) {
+                        let _ = verdict::upsert_release_cache_row(&row.tag, &json);
+                    }
                 }
                 row
             }).collect()
@@ -2411,27 +2489,33 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
             (Some(_),    None)       => true,
             _                        => false,
         };
-        let known = if need_deeper_walk { Default::default() }
+        // A row cached before `assets` was persisted, by a build on
+        // another architecture, cannot be re-picked offline — the
+        // asset list it would need was never stored. The incremental
+        // short-circuit would skip straight past those rows, so bypass
+        // it once to backfill them. Self-clearing: after this walk the
+        // rows carry their assets and the current arch.
+        let known = if need_deeper_walk || backfill { Default::default() }
                     else                { verdict::known_release_cache_tags() };
         let dl_idx = super::state::read_downloads_index();
         let result = if !need_deeper_walk {
             versions::github::list_nightly_releases_streaming_incremental(
-                count, tok, stop_at, filter, &known,
+                count, tok, stop_at, filter, &known, Some(&console),
                 |partial| {
-                    let rows = to_rows(partial, &dl_idx);
+                    let rows = to_rows(partial, &dl_idx, false);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
-                .map(|rs| to_rows(rs, &dl_idx))
-                .map_err(|e| e.to_string())
+                .map(|rs| to_rows(rs, &dl_idx, true))
+                .map_err(|e| format!("{e:#}"))
         } else {
             versions::github::list_nightly_releases_streaming(
-                count, tok, stop_at, filter,
+                count, tok, stop_at, filter, Some(&console),
                 |partial| {
-                    let rows = to_rows(partial, &dl_idx);
+                    let rows = to_rows(partial, &dl_idx, false);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
-                .map(|rs| to_rows(rs, &dl_idx))
-                .map_err(|e| e.to_string())
+                .map(|rs| to_rows(rs, &dl_idx, true))
+                .map_err(|e| format!("{e:#}"))
         };
         *slot.lock().unwrap() = Some(result);
     });
@@ -2668,15 +2752,15 @@ fn sort_available_indices(
             }
             C::Channel => a.channel.cmp(&b.channel),
             C::Verdict => {
-                let ra = verdict_rank(verdicts_by_tag.get(&a.tag).copied().unwrap_or(Verdict::Unknown));
-                let rb = verdict_rank(verdicts_by_tag.get(&b.tag).copied().unwrap_or(Verdict::Unknown));
+                let ra = verdict_rank(verdicts_by_tag.get(&a.install_key()).copied().unwrap_or(Verdict::Unknown));
+                let rb = verdict_rank(verdicts_by_tag.get(&b.install_key()).copied().unwrap_or(Verdict::Unknown));
                 ra.cmp(&rb)
             }
             C::Note => {
                 // Two-key sort: rows with notes first, then by note body.
                 let empty = String::new();
-                let na = notes_by_tag.get(&a.tag).unwrap_or(&empty);
-                let nb = notes_by_tag.get(&b.tag).unwrap_or(&empty);
+                let na = notes_by_tag.get(&a.install_key()).unwrap_or(&empty);
+                let nb = notes_by_tag.get(&b.install_key()).unwrap_or(&empty);
                 let pa = if na.is_empty() { 1 } else { 0 };
                 let pb = if nb.is_empty() { 1 } else { 0 };
                 pa.cmp(&pb).then(na.cmp(nb))

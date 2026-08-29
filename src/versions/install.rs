@@ -72,7 +72,11 @@ pub async fn install_tag(tag: &str) -> Result<PathBuf> {
 /// while downloading. The GUI uses this; the CLI passes `None`.
 pub async fn install_tag_with_progress(tag: &str, sink: Option<ProgressSink>) -> Result<PathBuf> {
     paths::ensure_dirs()?;
-    let release = github::get_release(tag).await?;
+    // `tag` may be an install key ("<tag>+x86") — the GitHub lookup
+    // needs the bare release tag, while the extract destination below
+    // keeps the full key so the two builds stay in separate dirs.
+    let release = github::get_release(
+        crate::versions::base_tag(tag)).await?;
     if !release.has_host_installer() {
         return Err(anyhow!("{tag} has no installer for this platform: {} \
                             (run `brave-regress versions available` to list installable tags)",

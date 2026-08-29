@@ -117,6 +117,22 @@ pub struct ReleaseRow {
     pub asset_url:   Option<String>,   // direct download URL for the picked asset
     pub asset_size:  Option<u64>,
     pub skip_reason: String,           // empty when host_asset is Some
+    /// Every asset GitHub listed for this release, kept so the pick can
+    /// be redone offline when the host architecture changes. Defaulted
+    /// for rows cached before this field existed — those cannot be
+    /// re-picked and need one fetch to backfill.
+    #[serde(default)]
+    pub assets: Vec<crate::versions::github::ReleaseAsset>,
+    /// Identifies the inputs `host_asset` was chosen under — host
+    /// architecture plus the user's architecture preference. Empty for
+    /// rows cached before this existed. See `github::current_pick_key`.
+    #[serde(default)]
+    pub pick_key: String,
+    /// True for the derived `[x86]` row on a host that emulates x86-64.
+    /// Never persisted — the cache stores one row per release and the
+    /// variant is expanded at load time from `assets`.
+    #[serde(skip)]
+    pub x86_variant: bool,
     /// True when the asset is already downloaded to the cache directory at
     /// the expected size — install can skip the download and go straight to
     /// extract. Computed at fetch time and refreshed after each install /
@@ -197,6 +213,75 @@ impl ReleaseRow {
         };
     }
 
+
+    /// Redo the host asset pick when the inputs behind it have changed —
+    /// a different host architecture, or a different Settings
+    /// architecture preference. Returns true when it changed something,
+    /// so the caller can re-persist.
+    ///
+    /// Until v0.9.1 there was no ARM Windows build, so an ARM machine ran
+    /// the x64 binary and cached the x64 zip for every tag. The
+    /// incremental fetch breaks out at the first known tag, so those
+    /// picks are never revisited — the list would show `…-win32-x64.zip`
+    /// forever even once an arm64 build is running.
+    ///
+    /// Rows cached before `assets` was persisted carry an empty list and
+    /// cannot be corrected here; `needs_asset_backfill` spots those and
+    /// forces one full walk to repopulate them.
+    pub fn repick_for_host_arch(&mut self) -> bool {
+        if self.pick_key == crate::versions::github::current_pick_key() {
+            return false;
+        }
+        if self.assets.is_empty() { return false; }
+        let ch = crate::versions::github::channel_from_label(&self.channel);
+        match crate::versions::github::pick_host_asset(&self.assets, ch) {
+            Some(a) => {
+                self.host_asset  = Some(a.name.clone());
+                self.asset_url   = Some(a.browser_download_url.clone());
+                self.asset_size  = Some(a.size);
+                self.skip_reason = String::new();
+            }
+            None => {
+                self.host_asset  = None;
+                self.asset_url   = None;
+                self.asset_size  = None;
+                self.skip_reason = "no installer for this platform".to_string();
+            }
+        }
+        self.pick_key = crate::versions::github::current_pick_key();
+        true
+    }
+
+    /// True when this row predates the stored-asset cache and was picked
+    /// by a different architecture — it can only be fixed by refetching.
+    pub fn needs_asset_backfill(&self) -> bool {
+        self.assets.is_empty()
+            && self.pick_key != crate::versions::github::current_pick_key()
+    }
+
+    /// Identity for everything that refers to an *install* rather than a
+    /// GitHub release: the install directory, and the verdict / note /
+    /// launch-args / user-data-dir rows keyed alongside it.
+    ///
+    /// The native build keeps the bare tag, so existing installs and
+    /// every verdict already recorded against them are untouched. Only
+    /// the emulated build takes a suffix, which `versions::list()` then
+    /// discovers as its own installed entry for free — the two builds of
+    /// one tag get independent verdicts, which is the whole point of
+    /// being able to install both.
+    ///
+    /// Anything talking to GitHub — compare ranges, tag metadata,
+    /// Chromium pins — must keep using `tag`, never this.
+    pub fn install_key(&self) -> String {
+        if self.x86_variant { format!("{}+x86", self.tag) } else { self.tag.clone() }
+    }
+
+    /// Strip the variant suffix an install key may carry, to get back to
+    /// the GitHub tag.
+    pub fn base_tag(key: &str) -> &str {
+        crate::versions::base_tag(key)
+    }
+
     /// Best-effort channel inference from the row's host asset name and
     /// tag, used to back-fill rows loaded from older caches that didn't
     /// persist a channel string. Brave's portable `.zip` filenames carry
@@ -210,6 +295,51 @@ impl ReleaseRow {
             else if probe.contains("beta")          { "Beta".into() }
             else                                    { "?".into() };
     }
+}
+
+/// Expand each cached release into the rows the Available list shows:
+/// the native build, plus a derived `[x86]` row wherever the host can
+/// emulate x86-64 and the release actually ships such an asset.
+///
+/// Derived rather than cached, so the two never drift: one stored row
+/// per release stays the source of truth and the variant is rebuilt
+/// from its asset list every time the setting or the host changes.
+/// Rows cached before `assets` was persisted have nothing to expand
+/// from and simply pass through.
+pub fn expand_arch_rows(rows: Vec<ReleaseRow>, show_x86: bool) -> Vec<ReleaseRow> {
+    if !show_x86 || !crate::versions::github::host_can_run_x86_under_emulation() {
+        return rows;
+    }
+    // The variant carries a different asset, so the "already
+    // downloaded" flag derived from the native one is meaningless — an
+    // x86 row would otherwise show the blue [cached] pill and
+    // "Install (cached)" for a file that was never fetched. One index
+    // read for the whole expansion.
+    let dl_idx = read_downloads_index();
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let ch = crate::versions::github::channel_from_label(&r.channel);
+        let x86 = crate::versions::github::pick_x86_asset(&r.assets, ch)
+            .map(|a| (a.name.clone(), a.browser_download_url.clone(), a.size));
+        let native_is_same = matches!((&x86, &r.host_asset),
+            (Some((n, _, _)), Some(h)) if n == h);
+        out.push(r.clone());
+        if let Some((name, url, size)) = x86 {
+            // Skip when the native pick already *is* that asset: an
+            // x64-only release on an ARM host would otherwise show the
+            // same download twice under two names.
+            if native_is_same { continue; }
+            let mut v = r;
+            v.x86_variant = true;
+            v.host_asset  = Some(name);
+            v.asset_url   = Some(url);
+            v.asset_size  = Some(size);
+            v.skip_reason = String::new();
+            v.refresh_cached_with(&dl_idx);
+            out.push(v);
+        }
+    }
+    out
 }
 
 /// On-disk cache for the available-releases listing so the in-memory
@@ -481,6 +611,13 @@ pub struct AppState {
     pub rt:      Handle,
     pub slots:   AsyncSlots,
     pub console: crate::console::Handle,
+    /// Which architecture's build to install where the host can run more
+    /// than one. Mirrored into `github::set_arch_preference` so the
+    /// pickers see it.
+    pub arch_preference: crate::config::ArchPreference,
+    /// Set once a fetch has bypassed the incremental short-circuit to
+    /// backfill asset lists, so that happens at most once per session.
+    pub asset_backfill_attempted: bool,
     /// Widest content the Console viewport has actually painted, in
     /// points. `max_line_chars` x glyph-width is only an estimate — it
     /// assumes every glyph has the monospace advance, which fails for
@@ -514,6 +651,8 @@ impl AppState {
         Self {
             console,
             console_content_w: 0.0,
+            arch_preference: crate::config::ArchPreference::default(),
+            asset_backfill_attempted: false,
             console_last_max_chars: 0,
             tab: Tab::Versions,
             installed: std::sync::Arc::new(vec![]),

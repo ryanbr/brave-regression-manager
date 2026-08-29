@@ -143,7 +143,7 @@ impl Release {
 /// care about channel filtering (default: Nightly only, matching legacy
 /// behaviour).
 pub async fn list_nightly_releases(count: u32) -> Result<Vec<Release>> {
-    list_releases_streaming(count, None, None, ChannelFilter::default(), None, |_| {}).await
+    list_releases_streaming(count, None, None, ChannelFilter::default(), None, None, |_| {}).await
 }
 
 /// Streaming variant: invokes `on_progress` after every paginated page
@@ -160,9 +160,10 @@ pub async fn list_nightly_releases_streaming(
     token: Option<&str>,
     stop_at: Option<chrono::NaiveDate>,
     filter: ChannelFilter,
+    console: Option<&crate::console::Handle>,
     on_progress: impl FnMut(Vec<Release>) + Send,
 ) -> Result<Vec<Release>> {
-    list_releases_streaming(count, token, stop_at, filter, None, on_progress).await
+    list_releases_streaming(count, token, stop_at, filter, None, console, on_progress).await
 }
 
 /// Same as the public entry point but also accepts `known_tags` — when
@@ -175,9 +176,49 @@ pub async fn list_nightly_releases_streaming_incremental(
     stop_at: Option<chrono::NaiveDate>,
     filter: ChannelFilter,
     known_tags: &std::collections::HashSet<String>,
+    console: Option<&crate::console::Handle>,
     on_progress: impl FnMut(Vec<Release>) + Send,
 ) -> Result<Vec<Release>> {
-    list_releases_streaming(count, token, stop_at, filter, Some(known_tags), on_progress).await
+    list_releases_streaming(count, token, stop_at, filter, Some(known_tags),
+                            console, on_progress).await
+}
+
+/// Pick the GitHub token to send, and make sure it can legally go in a
+/// header. Returns the token plus a label naming where it came from.
+///
+/// octocrab does not validate: `build()` assembles the header as
+/// `format!("Bearer {}", token).parse().unwrap()` (octocrab 0.39
+/// lib.rs:743), so a byte the header grammar rejects **panics** rather
+/// than erroring — and the release profile sets `panic = "abort"`, so
+/// that takes the whole GUI down with no message at all. A token read
+/// from a file by a launcher script keeps its trailing newline and does
+/// exactly this. Trim the whitespace that causes it and reject anything
+/// still outside the grammar with something the user can act on.
+///
+/// Empty (after trimming) means absent: sending a bare
+/// `Authorization: Bearer` earns a 401 indistinguishable from a revoked
+/// token. All four GitHub call paths route through here so they cannot
+/// drift apart again.
+fn header_token(settings: Option<&str>) -> Result<Option<(String, &'static str)>> {
+    let picked = settings
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .map(|t| (t, "Settings token"))
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|t| (t, "GITHUB_TOKEN env")));
+    let Some((raw, source)) = picked else { return Ok(None) };
+    let t = raw.trim();
+    // Visible ASCII only — the subset every GitHub PAT format uses, and
+    // a strict subset of what a header value permits.
+    if let Some(bad) = t.bytes().find(|b| !(0x21..=0x7e).contains(b)) {
+        return Err(anyhow!(
+            "the GitHub token from {source} contains a character that \
+             cannot be sent in an HTTP header (byte 0x{bad:02x}). Re-copy \
+             the token — an embedded space or line break is the usual \
+             cause."));
+    }
+    Ok(Some((t.to_string(), source)))
 }
 
 async fn list_releases_streaming(
@@ -186,19 +227,29 @@ async fn list_releases_streaming(
     stop_at: Option<chrono::NaiveDate>,
     filter: ChannelFilter,
     known_tags: Option<&std::collections::HashSet<String>>,
+    console: Option<&crate::console::Handle>,
     mut on_progress: impl FnMut(Vec<Release>) + Send,
 ) -> Result<Vec<Release>> {
+    // Diagnostics are opt-in: the GUI fetch passes a handle, the
+    // internal one-shot helpers pass None. Until this existed the whole
+    // fetch was silent between "Fetching…" and its result, so a failure
+    // gave the user nothing to act on. NEVER log the token itself — the
+    // masked `present (N chars)` form is the only representation used
+    // anywhere in this codebase.
+    let log = |msg: String| {
+        if let Some(h) = console { crate::console::info(h, "github", msg); }
+    };
+    let started = std::time::Instant::now();
+
     let filter = filter.nonempty();
     let mut builder = octocrab::OctocrabBuilder::new();
-    let chosen_token = token
-        .map(str::to_string)
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
-    if let Some(t) = chosen_token {
-        builder = builder.personal_token(t);
-    }
-    let octo = builder.build()?;
-
+    // Resolved before the start line below so that line can name the
+    // token source even when the token itself turns out to be unusable.
+    let chosen_token = header_token(token)?;
+    let auth_label = match &chosen_token {
+        Some((t, source)) => format!("{source}, present ({} chars)", t.len()),
+        None              => "anonymous (60 req/hr cap)".to_string(),
+    };
     let target = count.max(1) as usize;
     // 200 * 100 = 20 000 raw releases — easily covers Brave's whole
     // GitHub release history (≈ 7+ years). Either the target count,
@@ -214,10 +265,63 @@ async fn list_releases_streaming(
     // effective target so we don't stop short before crossing stop_at.
     let effective_target = if stop_at.is_some() { 20_000 } else { target };
 
+    let mut channels = Vec::new();
+    if filter.release { channels.push("Release"); }
+    if filter.beta    { channels.push("Beta"); }
+    if filter.nightly { channels.push("Nightly"); }
+    // Emitted BEFORE the client is built. personal_token() on a PAT
+    // pasted with a trailing newline or a stray non-ASCII character
+    // fails in build() with InvalidHeaderValue, and logging afterwards
+    // meant the one failure that is unambiguously token-shaped produced
+    // no auth line at all — while the 401 hint tells the user this line
+    // names which token was sent.
+    log(format!(
+        "fetch start: auth={auth_label}, target={effective_target}, \
+         channels=[{}], stop_at={}, incremental={}",
+        channels.join(", "),
+        stop_at.map(|d| d.to_string()).unwrap_or_else(|| "none".into()),
+        known_tags.map(|k| format!("yes ({} known tags)", k.len()))
+            .unwrap_or_else(|| "no (full walk)".into())));
+
+    if let Some((t, _)) = chosen_token {
+        builder = builder.personal_token(t);
+    }
+    let octo = builder.build()
+        .map_err(|e| anyhow::Error::new(e).context("building the GitHub client"))?;
+
+    // Named so the "why did it stop" line at the end can't drift out of
+    // sync with the breaks themselves — including the ceiling, which is
+    // derived from max_pages rather than restated.
+    let mut stop_reason = format!("page ceiling ({max_pages})");
+
     for page_num in 1..=max_pages {
-        let page = octo.repos(OWNER, REPO).releases().list()
-            .per_page(100).page(page_num).send().await?;
-        if page.items.is_empty() { break; }
+        let page = match octo.repos(OWNER, REPO).releases().list()
+            .per_page(100).page(page_num).send().await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                // Name the page. Failing on page 1 is auth or network;
+                // failing on page 7 is usually the rate limit landing
+                // mid-walk, and the two want different responses. The
+                // anyhow wrapper is what makes the message readable at
+                // all: octocrab's Error Displays as the bare word
+                // "GitHub" and keeps the API's text in its source.
+                //
+                // Deliberately not logged here — the caller's result
+                // drain prints it with the matching hint appended, and
+                // the context below survives into that message. Logging
+                // both would show one failure as two.
+                return Err(anyhow::Error::new(e)
+                    .context(format!("GitHub releases page {page_num}")));
+            }
+        };
+        let page_items = page.items.len();
+        let before = out.len();
+        if page.items.is_empty() {
+            log(format!("page {page_num}: empty — no more releases"));
+            stop_reason = "release list exhausted".to_string();
+            break;
+        }
 
         for r in page.items {
             // Incremental short-circuit: as soon as we see a tag we
@@ -227,7 +331,12 @@ async fn list_releases_streaming(
             // is enough; no gap detection needed because the cache is
             // append-only.
             if let Some(known) = known_tags {
-                if known.contains(&r.tag_name) { crossed_known = true; break; }
+                if known.contains(&r.tag_name) {
+                    log(format!("page {page_num}: hit cached tag {} — \
+                                 nothing older to fetch", r.tag_name));
+                    crossed_known = true;
+                    break;
+                }
             }
 
             let published = r.published_at.map(|d| d.to_rfc3339()).unwrap_or_default();
@@ -259,12 +368,36 @@ async fn list_releases_streaming(
             if out.len() >= effective_target { break; }
         }
         on_progress(out.clone());
+        // "added", not "kept after the channel filter": the delta also
+        // shrinks when the incremental short-circuit or the target cap
+        // breaks out mid-page, and the GUI always passes an
+        // all-channels filter — so attributing it to the filter would
+        // name the one cause that is usually not responsible. Each of
+        // those exits logs its own reason.
+        // Every page for the first ten, then every tenth. The ceiling is
+        // 200 pages and the console ring holds 1000 entries, so logging
+        // unconditionally could spend a fifth of the ring on one deep
+        // stop_at walk and evict the install / launch / Brave-stderr
+        // history it exists to sit alongside. Early pages are where the
+        // diagnostic value is; a long tail of them is just noise.
+        if page_num <= 10 || page_num % 10 == 0 {
+            log(format!("page {page_num}: {page_items} releases, {} added \
+                         (running total {})",
+                out.len() - before, out.len()));
+        }
         // Stop when we've reached our (uncapped if stop_at) target,
         // crossed the stop_at floor, or hit a known tag (incremental).
-        if out.len() >= effective_target { break; }
-        if crossed_stop { break; }
-        if crossed_known { break; }
+        if out.len() >= effective_target { stop_reason = "reached target".to_string(); break; }
+        if crossed_stop  { stop_reason = "crossed the stop_at date".to_string(); break; }
+        if crossed_known { stop_reason = "reached the cached tags".to_string(); break; }
     }
+    // "newly fetched", because on the incremental path the caller then
+    // logs the merged cache total under this same source — a warm
+    // re-fetch would otherwise read "fetch done: 0 releases" directly
+    // above "fetched 812 tags", which is the contradiction this change
+    // deleted the old pre-fetch line to avoid.
+    log(format!("fetch done: {} newly fetched in {:.1}s ({stop_reason})",
+        out.len(), started.elapsed().as_secs_f64()));
     Ok(out)
 }
 
@@ -273,7 +406,7 @@ pub async fn get_release(tag: &str) -> Result<Release> {
     // all-channels filter so install-by-tag works regardless of the GUI's
     // current display preference.
     let any = ChannelFilter { release: true, beta: true, nightly: true };
-    list_releases_streaming(500, None, None, any, None, |_| {}).await?
+    list_releases_streaming(500, None, None, any, None, None, |_| {}).await?
         .into_iter()
         .find(|r| r.tag == tag)
         .ok_or_else(|| anyhow!("release tag not found: {tag}"))
@@ -284,6 +417,76 @@ pub async fn get_release(tag: &str) -> Result<Release> {
 pub fn pick_asset(release: &Release) -> Result<&ReleaseAsset> {
     let channel = detect_release_channel(release);
     pick_asset_for(release, channel)
+}
+
+/// The subset of a release's assets worth caching for a later re-pick.
+///
+/// A Brave release lists dozens of files — per-platform installers,
+/// plus a `.sha256` and `.asc` beside most of them — and the row is
+/// serialised into both releases.json and every sqlite release_cache
+/// row, on the startup parse path. Only things a picker could ever
+/// return are useful, so drop the rest before persisting.
+pub fn installer_assets(assets: &[ReleaseAsset]) -> Vec<ReleaseAsset> {
+    assets.iter().filter(|a| {
+        let l = a.name.to_lowercase();
+        (l.ends_with(".zip") || l.ends_with(".exe")
+         || l.ends_with(".dmg") || l.ends_with(".deb"))
+            && !l.contains("symbol") && !l.contains("pdb") && !l.contains("debug")
+    }).cloned().collect()
+}
+
+/// Re-run the host asset pick against an already-known asset list.
+///
+/// The picked asset is host-architecture-specific, but a cached
+/// `ReleaseRow` records only the *result*. Exposing the pick lets a row
+/// cached by a build running on another architecture be corrected
+/// offline — no API call — instead of showing an x64 zip forever on an
+/// ARM host because the incremental fetch short-circuits before it ever
+/// re-picks.
+pub fn pick_host_asset(assets: &[ReleaseAsset], channel: Channel)
+    -> Option<&ReleaseAsset>
+{
+    pick_for_host(assets, channel)
+}
+
+/// The x86-64 asset for a host that can emulate one, or None.
+///
+/// Separate from `pick_host_asset` rather than folded into it as a
+/// fallback: the two are shown as two rows, installed side by side, and
+/// judged independently, so the caller decides which it wants instead of
+/// the picker silently substituting one for the other.
+pub fn pick_x86_asset(assets: &[ReleaseAsset], channel: Channel)
+    -> Option<&ReleaseAsset>
+{
+    if !host_can_run_x86_under_emulation() { return None; }
+    pick_x86_for_host(assets, channel)
+}
+
+/// True when this host runs an ARM build but can execute x86-64 too:
+/// Windows 11 on ARM emulates it, macOS has Rosetta 2. ARM Linux has
+/// neither, so it never offers the row.
+pub fn host_can_run_x86_under_emulation() -> bool {
+    std::env::consts::ARCH == "aarch64" && cfg!(any(windows, target_os = "macos"))
+}
+
+/// Identifies the inputs a cached `host_asset` was chosen under — just
+/// the host architecture, now that the x86 row is derived rather than
+/// substituted. A row whose stored key differs is re-picked from its
+/// stored asset list.
+pub fn current_pick_key() -> String {
+    std::env::consts::ARCH.to_string()
+}
+
+/// Parse the channel label persisted in a cached row.
+pub fn channel_from_label(s: &str) -> Channel {
+    match s {
+        "Beta"    => Channel::Beta,
+        "Release" => Channel::Release,
+        // "Nightly", "?" and anything unrecognised: Nightly is the
+        // permissive case for `name_compatible`, so a row whose channel
+        // never got classified still gets a usable pick.
+        _         => Channel::Nightly,
+    }
 }
 
 fn pick_asset_for(release: &Release, channel: Channel) -> Result<&ReleaseAsset> {
@@ -386,11 +589,12 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
     // didn't ship an x64 build for that tag (some recent nightlies
     // shipped arm-only), return None — surfaces as "no installer" in
     // the GUI rather than silently installing an unrunnable binary.
+    // Native only, both ways. On an ARM host the x86-64 build is no
+    // longer a silent fallback here — it is offered as its own `[x86]`
+    // row via `pick_x86_for_host`, so a release with no ARM asset
+    // correctly reports "no installer" on this side.
     let order: Vec<&dyn Fn(&str) -> bool> = if want_arm {
-        // ARM host: prefer arm, then any-arch zip, then arm exe;
-        // finally fall back to x64 (works under Win11-on-ARM emu).
-        vec![&zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm,
-             &zip_x64, &silent_standalone_x64, &standalone_x64]
+        vec![&zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm]
     } else {
         // x64 host: x64 only. No cross-arch fallback.
         vec![&zip_x64, &zip_any, &silent_standalone_x64, &standalone_x64]
@@ -400,6 +604,53 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
     }
     None
 }
+
+/// The x86-64 Windows asset, for the emulated `[x86]` row on an ARM
+/// host. Deliberately never returns an ARM or arch-less asset — this
+/// row exists to be unambiguously the x86-64 build.
+#[cfg(windows)]
+fn pick_x86_for_host(assets: &[ReleaseAsset], channel: Channel)
+    -> Option<&ReleaseAsset>
+{
+    let exe_ok = |n: &str| -> bool {
+        n.ends_with(".exe") && name_compatible(n, channel)
+    };
+    let is_windows_zip = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        (l.contains("win32") || l.contains("win64") || l.contains("win-")
+         || l.contains("windows-") || l.contains("-win"))
+            && !l.contains("darwin") && !l.contains("linux")
+            && !l.contains("mac") && !l.contains("osx")
+    };
+    let zip_x64 = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        l.ends_with(".zip") && name_compatible(n, channel) && is_windows_zip(n)
+            && !l.contains("pdb") && !l.contains("symbol") && !l.contains("debug")
+            && (l.contains("x64") || l.contains("amd64"))
+            && !l.contains("arm")
+    };
+    let silent_standalone_x64 = |n: &str| -> bool {
+        exe_ok(n) && n.contains("Standalone") && n.contains("Silent")
+            && !n.to_lowercase().contains("arm")
+    };
+    let standalone_x64 = |n: &str| -> bool {
+        exe_ok(n) && n.contains("Standalone")
+            && !n.to_lowercase().contains("arm")
+    };
+    let order: [&dyn Fn(&str) -> bool; 3] =
+        [&zip_x64, &silent_standalone_x64, &standalone_x64];
+    for matcher in order {
+        if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
+    }
+    None
+}
+
+/// No x86 emulation on ARM Linux, and an x64 host has no ARM row to
+/// pair with — `host_can_run_x86_under_emulation` gates the call, this
+/// keeps the symbol resolvable per-platform.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn pick_x86_for_host(_assets: &[ReleaseAsset], _channel: Channel)
+    -> Option<&ReleaseAsset> { None }
 
 #[cfg(target_os = "macos")]
 fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAsset> {
@@ -443,9 +694,34 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
         n.ends_with(".dmg") && name_compatible(n, channel)
     };
 
-    let order: [&dyn Fn(&str) -> bool; 7] = if want_arm
-        { [&zip_arm, &zip_any, &dmg_arm, &dmg_uni, &dmg_any, &dmg_x64, &zip_x64] }
-        else { [&zip_x64, &zip_any, &dmg_x64, &dmg_uni, &dmg_any, &dmg_arm, &zip_arm] };
+    // Native only — Rosetta 2 builds get their own `[x86]` row.
+    let order: Vec<&dyn Fn(&str) -> bool> = if want_arm {
+        vec![&zip_arm, &zip_any, &dmg_arm, &dmg_uni, &dmg_any]
+    } else {
+        vec![&zip_x64, &zip_any, &dmg_x64, &dmg_uni, &dmg_any, &dmg_arm, &zip_arm]
+    };
+    for matcher in order {
+        if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
+    }
+    None
+}
+
+/// The x86-64 macOS asset, for the Rosetta 2 `[x86]` row.
+#[cfg(target_os = "macos")]
+fn pick_x86_for_host(assets: &[ReleaseAsset], channel: Channel)
+    -> Option<&ReleaseAsset>
+{
+    let zip_x64 = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        n.ends_with(".zip") && name_compatible(n, channel) && is_macos_zip(n)
+            && !l.contains("symbol") && !l.contains("pdb") && !l.contains("debug")
+            && !l.contains("arm") && !l.contains("aarch64")
+    };
+    let dmg_x64 = |n: &str| -> bool {
+        n.ends_with(".dmg") && name_compatible(n, channel)
+            && (n.contains("x64") || n.contains("x86_64"))
+    };
+    let order: [&dyn Fn(&str) -> bool; 2] = [&zip_x64, &dmg_x64];
     for matcher in order {
         if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
     }
@@ -485,9 +761,7 @@ pub async fn fetch_release_by_tag(tag: &str, token: Option<&str>) -> Result<Rele
         .build()?
         .get(&url)
         .header("Accept", "application/vnd.github+json");
-    let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
-    if let Some(t) = chosen {
+    if let Some((t, _)) = header_token(token)? {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
     let resp = req.send().await?;
@@ -530,9 +804,7 @@ pub async fn fetch_release_metadata(tag: &str, token: Option<&str>)
         .build()?
         .get(&url)
         .header("Accept", "application/vnd.github+json");
-    let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
-    if let Some(t) = chosen {
+    if let Some((t, _)) = header_token(token)? {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
     let resp = req.send().await?;
@@ -555,9 +827,7 @@ pub async fn compare_commits(base: &str, head: &str, token: Option<&str>) -> Res
         .build()?
         .get(&url)
         .header("Accept", "application/vnd.github+json");
-    let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
-    if let Some(t) = chosen {
+    if let Some((t, _)) = header_token(token)? {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
     let resp = req.send().await?;

@@ -24,6 +24,11 @@ pub struct Gui {
     /// Personal access token (no scopes needed) — bumps GitHub's anonymous
     /// 60 req/hr ceiling to 5,000 req/hr. Empty string disables.
     #[serde(default)] pub github_token: String,
+    /// Which CPU architecture's Brave build to install when the host can
+    /// run more than one. Only meaningful on an ARM host with an
+    /// emulation layer — Windows 11 on ARM emulates x64, macOS has
+    /// Rosetta 2. ARM Linux has neither, so this is inert there.
+    #[serde(default)] pub arch_preference: ArchPreference,
     /// When true, every Brave launch passes `--disable-component-update`
     /// plus the poisoned-URL flag so adblock components stay pinned.
     /// Default OFF — most workflows want fresh components on launch.
@@ -144,6 +149,7 @@ impl Default for Gui {
             date_to:   String::new(),
             brave_log_level: BraveLogLevel::default(),
             github_token: String::new(),
+            arch_preference: ArchPreference::default(),
             freeze_components: false,
             block_drive_launcher: true,
             suppress_p3a_banner: true,
@@ -169,6 +175,34 @@ impl Default for Gui {
             settings_location: "versions".into(),
         }
     }
+}
+
+/// Architecture choice for hosts that can run more than one build.
+///
+/// Which build is running is itself a variable when bisecting: a
+/// regression that reproduces under x64 emulation may not reproduce on
+/// the native ARM build, and vice versa. Auto is the sane default, but
+/// pinning either way lets a bisect hold that variable still.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ArchPreference {
+    /// Native builds only. A release that shipped no ARM asset reports
+    /// "no installer".
+    Native,
+    /// Native builds, plus a separate `[x86]` row for every release that
+    /// also ships an x86-64 asset — so both can be installed side by
+    /// side and carry independent verdicts. Default, because it is the
+    /// only mode that keeps ARM-less releases installable at all.
+    #[default] NativeAndX86,
+}
+impl ArchPreference {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Native       => "Native only",
+            Self::NativeAndX86 => "Native + x86-64",
+        }
+    }
+    pub fn shows_x86(&self) -> bool { matches!(self, Self::NativeAndX86) }
+    pub const ALL: [ArchPreference; 2] = [Self::Native, Self::NativeAndX86];
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

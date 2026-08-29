@@ -95,12 +95,57 @@ pub struct App {
     initial_size_applied: bool,
 }
 
+/// Flatten a status message onto one line.
+///
+/// The bottom status panel is always present specifically so the
+/// central panel never reflows, and it renders `status_msg` with a
+/// plain `ui.label` — which breaks on an explicit `\n` whatever the
+/// wrap mode. Error text reaches it as `{e:#}`, and an octocrab
+/// `GitHubError` appends "\nDocumentation URL: …" on 401/403/404, so
+/// without this the panel silently grows a second row on exactly the
+/// failures the user is trying to read. Borrows in the common case;
+/// the full text stays intact in the Console, which splits per line.
+fn status_line(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\n') { std::borrow::Cow::Owned(s.replace('\n', " — ")) }
+    else                 { std::borrow::Cow::Borrowed(s) }
+}
+
 /// Pattern-match GitHub-fetch failure messages and return a short
 /// actionable hint when we recognise one. Same shape as the install /
 /// launch hint helpers — purely additive context, the raw error
 /// stays visible either way.
 fn fetch_failure_hint(raw: &str) -> Option<&'static str> {
     let lc = raw.to_lowercase();
+    // 401. A token that has been revoked, deleted, or has expired —
+    // GitHub expires unused PATs — fails in well under a second, which
+    // is the tell that separates it from a rate limit or a network
+    // stall. Anonymous access still works, so clearing the field is a
+    // valid answer for anyone under the 60 req/hr cap.
+    // Anchored on GitHub's own wording, never a bare "401": this hint is
+    // also applied to the regional-catalog result, whose parse failures
+    // read "<url> parse: … at line N column M" — a catalog that fails at
+    // line 401 would otherwise be reported as a revoked token.
+    // Two wordings, two transports. octocrab surfaces GitHub's JSON
+    // message ("Bad credentials"); the reqwest paths
+    // (fetch_release_by_tag, fetch_release_metadata, compare_commits)
+    // never parse the body and report `HTTP 401 Unauthorized` instead.
+    // Anchored either way — a bare "401" would match the "at line 401
+    // column N" tail of a serde error from the regional catalog, which
+    // shares this hint function.
+    if lc.contains("bad credentials")
+        || lc.contains("requires authentication")
+        || lc.contains("http 401")
+        || lc.contains("401 unauthorized")
+    {
+        return Some("GitHub rejected the token being used: it has been \
+                     revoked, deleted, or expired. The token comes from \
+                     Settings -> GitHub token, or from a GITHUB_TOKEN \
+                     environment variable when that field is empty (a \
+                     'Fetch GitHub releases' logs which one it sent). \
+                     Issue a fresh personal access token (no scopes \
+                     needed), or remove it entirely to fall back to \
+                     anonymous access at 60 req/hr.");
+    }
     if lc.contains("403") || lc.contains("rate limit") {
         return Some("GitHub rate limit hit. Paste a personal access \
                      token in Settings → GitHub token (no scopes \
@@ -183,6 +228,7 @@ impl App {
         state.date_to   = parse_date(&cfg.gui.date_to).map(clamp_loaded_date);
         state.brave_log_level = cfg.gui.brave_log_level;
         state.github_token    = cfg.gui.github_token.clone();
+        state.arch_preference = cfg.gui.arch_preference;
         state.freeze_components = cfg.gui.freeze_components;
         state.block_drive_launcher = cfg.gui.block_drive_launcher;
         state.suppress_p3a_banner = cfg.gui.suppress_p3a_banner;
@@ -274,7 +320,8 @@ impl App {
              suppress_p3a_banner={}  auto_open_url={}  \
              versions_dir={}  default_profile_folder={}  default_args={}  \
              clean_profile_per_launch={}  reuse_clean_profile={}  \
-             launch_as_admin={}  github_token={}  settings_location={}",
+             launch_as_admin={}  github_token={}  arch_pref={}  \
+             settings_location={}",
             state.theme, chans, state.release_count, date_filter,
             state.brave_log_level, state.freeze_components, state.block_drive_launcher,
             state.suppress_p3a_banner,
@@ -285,7 +332,8 @@ impl App {
             },
             versions_dir_str, prof_dir, def_args,
             state.clean_profile_per_launch, state.reuse_clean_profile,
-            state.launch_as_admin, token_str, state.settings_location));
+            state.launch_as_admin, token_str,
+            state.arch_preference.label(), state.settings_location));
         // Defer the heavy startup work — releases.json read + JSON
         // parse + (incremental) sqlite merge — to a background tokio
         // task so the window paints immediately. Drain block in
@@ -315,6 +363,18 @@ impl App {
                 let dl_idx = super::state::read_downloads_index();
                 let mut rows = cache.rows;
                 for r in &mut rows { r.refresh_cached_with(&dl_idx); r.ensure_channel(); }
+                // releases.json rows win over sqlite in the merge below,
+                // so correcting them only in sqlite left the stale pick
+                // to be re-corrected — and re-announced — on every
+                // launch. Fix them here and write the file back.
+                let mut json_fixed = 0usize;
+                for r in rows.iter_mut() {
+                    if r.repick_for_host_arch() { json_fixed += 1; }
+                }
+                if json_fixed > 0 {
+                    for r in rows.iter_mut() { r.refresh_cached_with(&dl_idx); }
+                    let _ = ReleaseCache::save(&rows);
+                }
                 // Always-on incremental cache — union with everything
                 // sqlite has ever seen so the GUI starts up with the
                 // full known history (releases.json holds the last
@@ -328,6 +388,29 @@ impl App {
                         r.ensure_channel();
                         by_tag.entry(r.tag.clone()).or_insert(r);
                     }
+                }
+                // Correct any row whose asset was picked by a build
+                // running on a different CPU architecture — the ARM
+                // Windows build inheriting an x64 cache is the case
+                // this exists for. Offline; re-persisted so the fix
+                // sticks.
+                let mut repicked = json_fixed;
+                for r in by_tag.values_mut() {
+                    if r.repick_for_host_arch() {
+                        // asset_size just changed, so the "already
+                        // downloaded" flag derived from it is stale.
+                        r.refresh_cached_with(&dl_idx);
+                        repicked += 1;
+                        if let Ok(j) = serde_json::to_string(&r) {
+                            let _ = crate::verdict::upsert_release_cache_row(&r.tag, &j);
+                        }
+                    }
+                }
+                if repicked > 0 {
+                    crate::console::info(&console_for_purge, "cache", format!(
+                        "re-picked the install asset for {repicked} cached \
+                         release(s): they were chosen on a different CPU \
+                         architecture ({})", std::env::consts::ARCH));
                 }
                 rows = by_tag.into_values().collect();
                 rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));
@@ -349,6 +432,7 @@ impl App {
         cfg.gui.date_to   = self.state.date_to.map(|d| d.to_string()).unwrap_or_default();
         cfg.gui.brave_log_level = self.state.brave_log_level;
         cfg.gui.github_token    = self.state.github_token.clone();
+        cfg.gui.arch_preference = self.state.arch_preference;
         cfg.gui.freeze_components = self.state.freeze_components;
         cfg.gui.block_drive_launcher = self.state.block_drive_launcher;
         cfg.gui.suppress_p3a_banner = self.state.suppress_p3a_banner;
@@ -472,7 +556,9 @@ impl App {
             if let Ok((rows, fetched_at)) = res {
                 let needs_refetch = rows.iter()
                     .any(|r| r.channel == "?" || r.channel.is_empty());
-                self.state.available = std::sync::Arc::new(rows);
+                self.state.available = std::sync::Arc::new(
+                    super::state::expand_arch_rows(
+                        rows, self.state.arch_preference.shows_x86()));
                 self.state.available_fetched_at = fetched_at;
                 if needs_refetch { tab_versions::spawn_fetch(&mut self.state); }
             }
@@ -481,7 +567,9 @@ impl App {
         // list as each page lands so the UI shows progress instead of a
         // blank "fetching…" wait.
         if let Some(partial) = self.state.slots.partial_releases.lock().unwrap().take() {
-            self.state.available = std::sync::Arc::new(partial);
+            self.state.available = std::sync::Arc::new(
+                super::state::expand_arch_rows(
+                    partial, self.state.arch_preference.shows_x86()));
             // Persisting between every page would thrash the cache file;
             // wait for the final result before saving.
         }
@@ -517,7 +605,9 @@ impl App {
                         console::warn(&self.state.console, "cache",
                             format!("could not persist releases cache: {e}"));
                     }
-                    self.state.available = std::sync::Arc::new(rows);
+                    self.state.available = std::sync::Arc::new(
+                        super::state::expand_arch_rows(
+                            rows, self.state.arch_preference.shows_x86()));
                     self.state.available_fetched_at = Some(chrono::Utc::now());
                 }
                 Err(e) => {
@@ -642,7 +732,11 @@ impl App {
                     let tag = row.tag.clone();
                     let av = std::sync::Arc::make_mut(&mut self.state.available);
                     av.retain(|r| r.tag != tag);
-                    av.push(row);
+                    // Expand like every other write of `available`, or a
+                    // just-added tag would be the one release missing its
+                    // [x86] row until the next fetch or restart.
+                    av.extend(super::state::expand_arch_rows(
+                        vec![row], self.state.arch_preference.shows_x86()));
                     av.sort_by(|a, b| b.published_at.cmp(&a.published_at));
                     // Mark this tag as user-added so the per-row channel
                     // filter exempts it — adding a Release tag while the
@@ -765,7 +859,7 @@ impl eframe::App for App {
                 .inner_margin(egui::Margin::symmetric(6.0, 2.0)))
             .show_separator_line(false)
             .show(ctx, |ui| {
-                ui.label(&self.state.status_msg);
+                ui.label(status_line(&self.state.status_msg).as_ref());
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.state.tab {
