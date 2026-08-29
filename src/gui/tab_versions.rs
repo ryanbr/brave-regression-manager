@@ -980,7 +980,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             oldest = Some(&r.published_at);
         }
         let pass_installer = !(state.hide_no_installer && r.host_asset.is_none());
-        let pass_date      = date_in_range(&r.published_at, state.date_from, state.date_to);
+        // Manual tags bypass the date filter when the entry list is
+        // built, so they must bypass it in this count too. Otherwise a
+        // list of only out-of-range manual tags reports "0 of N match"
+        // and suppresses the header — while rendering those rows below
+        // it, headerless and with no reachable sort controls.
+        let pass_date      = state.manual_release_tags.contains(&r.tag)
+            || date_in_range(&r.published_at, state.date_from, state.date_to);
         if pass_installer && pass_date && pass_channel(r) { shown += 1; }
     }
     if !rows.is_empty() && shown == 0 {
@@ -1028,8 +1034,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         // Bump the column-header text +1pt over body so the row
         // reads as a header even at quick glance — matching the
         // Installed-versions panel's heading-size convention.
+        //
+        // +2 because the header used to be drawn inside the list, whose
+        // scope had already bumped every text style by 1px; now that it
+        // sits above the scroll area it has to carry both, or header and
+        // body render identically and the row stops reading as a header.
         let header_size =
-            egui::TextStyle::Body.resolve(ui.style()).size + 1.0;
+            egui::TextStyle::Body.resolve(ui.style()).size + 2.0;
         ui.horizontal(|ui| {
             let mut header = |ui: &mut Ui, w: f32, text: &str,
                               col: super::state::AvailSortColumn|
@@ -1133,11 +1144,17 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     }
 
     // Rows carry buttons and combo boxes, so the slot is interact_size
-    // tall, not text height. The +1.0 mirrors the text-style bump
-    // applied inside the list below.
+    // tall, not text height. The +1.0 mirrors the text-style bump the
+    // list applies to itself below.
+    //
+    // Deliberately WITHOUT item_spacing: the parameter is
+    // `row_height_sans_spacing` and show_rows adds the spacing itself
+    // (egui 0.27.2 scroll_area.rs:697). Adding it here budgeted an
+    // extra spacing per slot, which both left an unfillable band at the
+    // bottom of the viewport and made the scroll extent overshoot the
+    // content by item_spacing * n.
     let row_h = ui.spacing().interact_size.y
-        .max(egui::TextStyle::Body.resolve(ui.style()).size + 1.0)
-        + ui.spacing().item_spacing.y;
+        .max(ui.text_style_height(&egui::TextStyle::Body) + 1.0);
 
     egui::ScrollArea::vertical().id_source("avail")
         .auto_shrink([false; 2])
@@ -1161,6 +1178,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             };
             let r = &rows[row_idx];
             let is_manual = state.manual_release_tags.contains(&r.tag);
+            // show_rows' auto-id skip assumes one widget per row. These
+            // rows use several, and a variable number — an uninstalled
+            // row adds an Install button, a manual one a Remove button —
+            // so without an explicit id a button's identity shifts when
+            // the first visible row changes. Press Install, scroll
+            // before releasing, and the click is silently dropped.
+            ui.push_id(row_idx, |ui| {
             ui.horizontal(|ui| {
                 // Reserve a fixed-width cell, then place the widget inside.
                 // `scope` lets us set a min_size without bleeding into the
@@ -1378,6 +1402,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     });
                 }
             });
+            });   // push_id(row_idx)
         }
     });
 
