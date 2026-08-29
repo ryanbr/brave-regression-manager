@@ -1259,7 +1259,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 fixed_cell(ui, COL_VERDICT, &mut |ui| {
-                    let row_verdict = verdicts_by_tag.get(&r.install_key()).copied().unwrap_or(Verdict::Unknown);
+                    let row_verdict = verdicts_by_tag.get(r.install_key().as_ref()).copied().unwrap_or(Verdict::Unknown);
                     if row_verdict != Verdict::Unknown {
                         ui.colored_label(verdict_color(row_verdict),
                             RichText::new(format!("[{}]", verdict_label(row_verdict))).strong());
@@ -1267,7 +1267,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 // Note cell — inline so it can mutate state when clicked.
-                let cur_note = notes_by_tag.get(&r.install_key()).cloned().unwrap_or_default();
+                let cur_note = notes_by_tag.get(r.install_key().as_ref()).cloned().unwrap_or_default();
                 ui.scope(|ui| {
                     ui.set_min_width(COL_NOTE);
                     ui.set_max_width(COL_NOTE);
@@ -1282,7 +1282,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .on_hover_text(hover)
                         .clicked()
                     {
-                        state.editing_note_tag = Some(r.install_key());
+                        state.editing_note_tag = Some(r.install_key().into_owned());
                         state.editing_note_buf = cur_note.clone();
                         state.note_window_just_opened = true;
                         // Logged so "clicking does nothing" can be told
@@ -1294,7 +1294,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 let installed = versions::is_installed(&r.install_key());
-                let busy = installing_now.contains(&r.install_key());
+                let busy = installing_now.contains(r.install_key().as_ref());
 
                 // Status/action cell. For manually-added rows, the
                 // Remove button is rendered inside the same fixed-width
@@ -1420,7 +1420,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             .on_hover_text(&cur_note)
                             .clicked()
                         {
-                            state.editing_note_tag = Some(r.install_key());
+                            state.editing_note_tag = Some(r.install_key().into_owned());
                             state.editing_note_buf = cur_note.clone();
                             state.note_window_just_opened = true;
                             // Logged so "clicking does nothing" can be told
@@ -1616,7 +1616,7 @@ fn render_status_cell(
                         }
                         let btn_label = if r.cached { "Install (cached)" } else { "Install" };
                         let arch_mismatch = is_opposite_arch_asset(name);
-                        let already_installing = installing_now.contains(&r.install_key());
+                        let already_installing = installing_now.contains(r.install_key().as_ref());
                         let cap_reached = installing_now.len() >= install_cap;
                         let btn_resp = ui.add_enabled(
                             !already_installing && !cap_reached && !arch_mismatch,
@@ -1644,8 +1644,8 @@ fn render_status_cell(
                             // entry is never removed and the row stays
                             // "installing…" — holding a concurrency slot
                             // and a 100ms repaint — for the session.
-                            state.installing.insert(r.install_key());
-                            state.installing_started.insert(r.install_key(),
+                            state.installing.insert(r.install_key().into_owned());
+                            state.installing_started.insert(r.install_key().into_owned(),
                                 std::time::Instant::now());
                             state.status_msg = format!("installing {}…", r.tag);
                             // Pre-install summary — confirms which asset is
@@ -1662,11 +1662,11 @@ fn render_status_cell(
                             // stale completed-state doesn't briefly
                             // flash before the new download writes its
                             // first sample. Other tags' entries stay.
-                            progress.lock().unwrap().remove(&r.install_key());
+                            progress.lock().unwrap().remove(r.install_key().as_ref());
                             // The install DIRECTORY and every per-install row keyed beside it.
                             // Native keeps the bare tag, so existing
                             // installs and their verdicts are untouched.
-                            let tag2     = r.install_key();
+                            let tag2     = r.install_key().into_owned();
                             let name2    = name.clone();
                             let url      = r.asset_url.clone();
                             let size     = r.asset_size;
@@ -2916,15 +2916,15 @@ fn sort_available_indices(
             }
             C::Channel => a.channel.cmp(&b.channel),
             C::Verdict => {
-                let ra = verdict_rank(verdicts_by_tag.get(&a.install_key()).copied().unwrap_or(Verdict::Unknown));
-                let rb = verdict_rank(verdicts_by_tag.get(&b.install_key()).copied().unwrap_or(Verdict::Unknown));
+                let ra = verdict_rank(verdicts_by_tag.get(a.install_key().as_ref()).copied().unwrap_or(Verdict::Unknown));
+                let rb = verdict_rank(verdicts_by_tag.get(b.install_key().as_ref()).copied().unwrap_or(Verdict::Unknown));
                 ra.cmp(&rb)
             }
             C::Note => {
                 // Two-key sort: rows with notes first, then by note body.
                 let empty = String::new();
-                let na = notes_by_tag.get(&a.install_key()).unwrap_or(&empty);
-                let nb = notes_by_tag.get(&b.install_key()).unwrap_or(&empty);
+                let na = notes_by_tag.get(a.install_key().as_ref()).unwrap_or(&empty);
+                let nb = notes_by_tag.get(b.install_key().as_ref()).unwrap_or(&empty);
                 let pa = if na.is_empty() { 1 } else { 0 };
                 let pb = if nb.is_empty() { 1 } else { 0 };
                 pa.cmp(&pb).then(na.cmp(nb))
