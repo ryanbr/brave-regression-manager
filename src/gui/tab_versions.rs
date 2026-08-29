@@ -2317,8 +2317,14 @@ fn collect_report_data(
         // `installed` holds install keys (directory names), which for a
         // non-variant row is the bare tag.
         if !installed_tags.contains(r.tag.as_str()) { continue; }
+        // GOOD or BAD only. BUGGY and UNSURE are working notes, not
+        // evidence about the bracket — and the bracket itself only
+        // anchors on firm GOOD <-> BAD pairs (see the sorted_tags loop),
+        // so admitting the soft verdicts here reported as findings what
+        // the panel above deliberately refuses to draw a conclusion
+        // from.
         let v = verdicts_by_tag.get(&r.tag).copied().unwrap_or(Verdict::Unknown);
-        if matches!(v, Verdict::Unknown | Verdict::Untested) { continue; }
+        if !matches!(v, Verdict::Good | Verdict::Bad) { continue; }
         let date = r.published_at.get(..10).unwrap_or(&r.published_at).to_string();
         let chr = r.chromium_version.clone().unwrap_or_default();
         others.push((r.tag.clone(), v, date, chr));
@@ -3297,12 +3303,12 @@ mod report_scope_tests {
     /// design, so having one is not sufficient — the version has to
     /// still be on disk, which is also what the bracket is built from.
     fn included(tag: &str, channel: &str, report_channel: &str,
-                has_verdict: bool, installed: &[&str],
+                verdict: &str, installed: &[&str],
                 good: &str, bad: &str) -> bool {
         channel == report_channel
             && tag != good && tag != bad
             && installed.contains(&tag)
-            && has_verdict
+            && matches!(verdict, "GOOD" | "BAD")
     }
 
     const INSTALLED: &[&str] = &[
@@ -3315,7 +3321,7 @@ mod report_scope_tests {
         // Judged months ago, long since uninstalled — the case that put
         // 24 rows in a report covering 9 installed versions.
         for tag in ["v1.84.23", "v1.89.9", "v1.93.47"] {
-            assert!(!included(tag, "Nightly", "Nightly", true, INSTALLED,
+            assert!(!included(tag, "Nightly", "Nightly", "BAD", INSTALLED,
                               "v1.96.8", "v1.96.9"),
                     "{tag} is not installed and must not be reported");
         }
@@ -3324,28 +3330,39 @@ mod report_scope_tests {
     #[test]
     fn installed_and_judged_is_listed() {
         for tag in ["v1.96.29", "v1.96.5", "v1.95.73"] {
-            assert!(included(tag, "Nightly", "Nightly", true, INSTALLED,
+            assert!(included(tag, "Nightly", "Nightly", "BAD", INSTALLED,
                              "v1.96.8", "v1.96.9"));
         }
     }
 
     #[test]
     fn the_bracket_endpoints_are_not_repeated() {
-        assert!(!included("v1.96.8", "Nightly", "Nightly", true, INSTALLED,
+        assert!(!included("v1.96.8", "Nightly", "Nightly", "GOOD", INSTALLED,
                           "v1.96.8", "v1.96.9"));
-        assert!(!included("v1.96.9", "Nightly", "Nightly", true, INSTALLED,
+        assert!(!included("v1.96.9", "Nightly", "Nightly", "BAD", INSTALLED,
                           "v1.96.8", "v1.96.9"));
     }
 
     #[test]
     fn installed_but_unjudged_is_not_listed() {
-        assert!(!included("v1.96.22", "Nightly", "Nightly", false, INSTALLED,
+        assert!(!included("v1.96.22", "Nightly", "Nightly", "NEW", INSTALLED,
                           "v1.96.8", "v1.96.9"));
+    }
+
+    /// BUGGY and UNSURE are working notes, not evidence — and the
+    /// bracket refuses to anchor on them for the same reason.
+    #[test]
+    fn soft_verdicts_are_not_listed() {
+        for v in ["BUGGY", "UNSURE", "NEW", "Clear"] {
+            assert!(!included("v1.96.10", "Nightly", "Nightly", v, INSTALLED,
+                              "v1.96.8", "v1.96.9"),
+                    "{v} is not a GOOD/BAD finding");
+        }
     }
 
     #[test]
     fn another_channel_is_not_listed() {
-        assert!(!included("v1.96.5", "Beta", "Nightly", true, INSTALLED,
+        assert!(!included("v1.96.5", "Beta", "Nightly", "GOOD", INSTALLED,
                           "v1.96.8", "v1.96.9"));
     }
 }
