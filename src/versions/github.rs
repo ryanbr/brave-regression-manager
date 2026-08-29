@@ -551,12 +551,23 @@ pub fn host_can_run_x86_under_emulation() -> bool {
     std::env::consts::ARCH == "aarch64" && cfg!(any(windows, target_os = "macos"))
 }
 
-/// Identifies the inputs a cached `host_asset` was chosen under — just
-/// the host architecture, now that the x86 row is derived rather than
-/// substituted. A row whose stored key differs is re-picked from its
-/// stored asset list.
+/// Identifies the inputs a cached `host_asset` was chosen under: the
+/// host OS and architecture. A row whose stored key differs is re-picked
+/// from its stored asset list.
+///
+/// The OS is in the key because `installer_assets` scopes the stored
+/// list to the platform that wrote it, and nothing else records which
+/// one that was. With a shared data root — `BRAVE_REGRESS_HOME` on a
+/// network home, a dual boot, or a WSL build and a Windows build both
+/// pointed at /mnt/c — one OS would rewrite each row's assets to its
+/// own, and the other would then either keep a foreign `host_asset`
+/// (arch happens to match) or, worse, find nothing selectable in the
+/// foreign list and permanently rewrite the row to "no installer for
+/// this platform" and persist that. Keying on the OS as well makes the
+/// row self-describing, so the existing re-pick and backfill paths
+/// handle the crossover instead of poisoning it.
 pub fn current_pick_key() -> String {
-    std::env::consts::ARCH.to_string()
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// Parse the channel label persisted in a cached row.
