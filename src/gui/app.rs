@@ -101,6 +101,21 @@ pub struct App {
 /// stays visible either way.
 fn fetch_failure_hint(raw: &str) -> Option<&'static str> {
     let lc = raw.to_lowercase();
+    // 401. A token that has been revoked, deleted, or has expired —
+    // GitHub expires unused PATs — fails in well under a second, which
+    // is the tell that separates it from a rate limit or a network
+    // stall. Anonymous access still works, so clearing the field is a
+    // valid answer for anyone under the 60 req/hr cap.
+    if lc.contains("bad credentials")
+        || lc.contains("401")
+        || lc.contains("requires authentication")
+    {
+        return Some("GitHub rejected the token in Settings -> GitHub \
+                     token: it has been revoked, deleted, or expired. \
+                     Issue a fresh personal access token (no scopes \
+                     needed), or clear the field to fall back to \
+                     anonymous access at 60 req/hr.");
+    }
     if lc.contains("403") || lc.contains("rate limit") {
         return Some("GitHub rate limit hit. Paste a personal access \
                      token in Settings → GitHub token (no scopes \

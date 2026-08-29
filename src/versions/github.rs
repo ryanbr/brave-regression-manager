@@ -143,7 +143,7 @@ impl Release {
 /// care about channel filtering (default: Nightly only, matching legacy
 /// behaviour).
 pub async fn list_nightly_releases(count: u32) -> Result<Vec<Release>> {
-    list_releases_streaming(count, None, None, ChannelFilter::default(), None, |_| {}).await
+    list_releases_streaming(count, None, None, ChannelFilter::default(), None, None, |_| {}).await
 }
 
 /// Streaming variant: invokes `on_progress` after every paginated page
@@ -160,9 +160,10 @@ pub async fn list_nightly_releases_streaming(
     token: Option<&str>,
     stop_at: Option<chrono::NaiveDate>,
     filter: ChannelFilter,
+    console: Option<&crate::console::Handle>,
     on_progress: impl FnMut(Vec<Release>) + Send,
 ) -> Result<Vec<Release>> {
-    list_releases_streaming(count, token, stop_at, filter, None, on_progress).await
+    list_releases_streaming(count, token, stop_at, filter, None, console, on_progress).await
 }
 
 /// Same as the public entry point but also accepts `known_tags` — when
@@ -175,9 +176,11 @@ pub async fn list_nightly_releases_streaming_incremental(
     stop_at: Option<chrono::NaiveDate>,
     filter: ChannelFilter,
     known_tags: &std::collections::HashSet<String>,
+    console: Option<&crate::console::Handle>,
     on_progress: impl FnMut(Vec<Release>) + Send,
 ) -> Result<Vec<Release>> {
-    list_releases_streaming(count, token, stop_at, filter, Some(known_tags), on_progress).await
+    list_releases_streaming(count, token, stop_at, filter, Some(known_tags),
+                            console, on_progress).await
 }
 
 async fn list_releases_streaming(
@@ -186,18 +189,49 @@ async fn list_releases_streaming(
     stop_at: Option<chrono::NaiveDate>,
     filter: ChannelFilter,
     known_tags: Option<&std::collections::HashSet<String>>,
+    console: Option<&crate::console::Handle>,
     mut on_progress: impl FnMut(Vec<Release>) + Send,
 ) -> Result<Vec<Release>> {
+    // Diagnostics are opt-in: the GUI fetch passes a handle, the
+    // internal one-shot helpers pass None. Until this existed the whole
+    // fetch was silent between "Fetching…" and its result, so a failure
+    // gave the user nothing to act on. NEVER log the token itself — the
+    // masked `present (N chars)` form is the only representation used
+    // anywhere in this codebase.
+    let log = |msg: String| {
+        if let Some(h) = console { crate::console::info(h, "github", msg); }
+    };
+    let started = std::time::Instant::now();
+
     let filter = filter.nonempty();
     let mut builder = octocrab::OctocrabBuilder::new();
-    let chosen_token = token
-        .map(str::to_string)
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
+    let from_settings = token.map(str::to_string).filter(|s| !s.is_empty());
+    // An empty GITHUB_TOKEN used to slip through `.ok()` and be handed
+    // to `personal_token("")`, which sends a bare `Authorization: Bearer`
+    // and earns a 401 — indistinguishable, before this, from a revoked
+    // token. Treat empty as absent.
+    let auth_label;
+    let chosen_token = match from_settings {
+        Some(t) => {
+            auth_label = format!("Settings token, present ({} chars)", t.len());
+            Some(t)
+        }
+        None => match std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()) {
+            Some(t) => {
+                auth_label = format!("GITHUB_TOKEN env, present ({} chars)", t.len());
+                Some(t)
+            }
+            None => {
+                auth_label = "anonymous (60 req/hr cap)".to_string();
+                None
+            }
+        },
+    };
     if let Some(t) = chosen_token {
         builder = builder.personal_token(t);
     }
-    let octo = builder.build()?;
+    let octo = builder.build()
+        .map_err(|e| anyhow::Error::new(e).context("building the GitHub client"))?;
 
     let target = count.max(1) as usize;
     // 200 * 100 = 20 000 raw releases — easily covers Brave's whole
@@ -214,10 +248,49 @@ async fn list_releases_streaming(
     // effective target so we don't stop short before crossing stop_at.
     let effective_target = if stop_at.is_some() { 20_000 } else { target };
 
+    let mut channels = Vec::new();
+    if filter.release { channels.push("Release"); }
+    if filter.beta    { channels.push("Beta"); }
+    if filter.nightly { channels.push("Nightly"); }
+    log(format!(
+        "fetch start: auth={auth_label}, target={effective_target}, \
+         channels=[{}], stop_at={}, incremental={}",
+        channels.join(", "),
+        stop_at.map(|d| d.to_string()).unwrap_or_else(|| "none".into()),
+        known_tags.map(|k| format!("yes ({} known tags)", k.len()))
+            .unwrap_or_else(|| "no (full walk)".into())));
+
+    // Named so the "why did it stop" line at the end can't drift out of
+    // sync with the breaks themselves.
+    let mut stop_reason = "page ceiling (200)";
+
     for page_num in 1..=max_pages {
-        let page = octo.repos(OWNER, REPO).releases().list()
-            .per_page(100).page(page_num).send().await?;
-        if page.items.is_empty() { break; }
+        let page = match octo.repos(OWNER, REPO).releases().list()
+            .per_page(100).page(page_num).send().await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                // Name the page. Failing on page 1 is auth or network;
+                // failing on page 7 is usually the rate limit landing
+                // mid-walk, and the two want different responses. The
+                // anyhow wrapper is what makes the message readable at
+                // all: octocrab's Error Displays as the bare word
+                // "GitHub" and keeps the API's text in its source.
+                let err = anyhow::Error::new(e)
+                    .context(format!("GitHub releases page {page_num}"));
+                if let Some(h) = console {
+                    crate::console::error(h, "github", format!("{err:#}"));
+                }
+                return Err(err);
+            }
+        };
+        let page_items = page.items.len();
+        let before = out.len();
+        if page.items.is_empty() {
+            log(format!("page {page_num}: empty — no more releases"));
+            stop_reason = "release list exhausted";
+            break;
+        }
 
         for r in page.items {
             // Incremental short-circuit: as soon as we see a tag we
@@ -227,7 +300,12 @@ async fn list_releases_streaming(
             // is enough; no gap detection needed because the cache is
             // append-only.
             if let Some(known) = known_tags {
-                if known.contains(&r.tag_name) { crossed_known = true; break; }
+                if known.contains(&r.tag_name) {
+                    log(format!("page {page_num}: hit cached tag {} — \
+                                 nothing older to fetch", r.tag_name));
+                    crossed_known = true;
+                    break;
+                }
             }
 
             let published = r.published_at.map(|d| d.to_rfc3339()).unwrap_or_default();
@@ -259,12 +337,18 @@ async fn list_releases_streaming(
             if out.len() >= effective_target { break; }
         }
         on_progress(out.clone());
+        log(format!(
+            "page {page_num}: {page_items} releases, {} kept after channel \
+             filter (running total {})",
+            out.len() - before, out.len()));
         // Stop when we've reached our (uncapped if stop_at) target,
         // crossed the stop_at floor, or hit a known tag (incremental).
-        if out.len() >= effective_target { break; }
-        if crossed_stop { break; }
-        if crossed_known { break; }
+        if out.len() >= effective_target { stop_reason = "reached target"; break; }
+        if crossed_stop  { stop_reason = "crossed the stop_at date"; break; }
+        if crossed_known { stop_reason = "reached the cached tags"; break; }
     }
+    log(format!("fetch done: {} releases in {:.1}s ({stop_reason})",
+        out.len(), started.elapsed().as_secs_f64()));
     Ok(out)
 }
 
@@ -273,7 +357,7 @@ pub async fn get_release(tag: &str) -> Result<Release> {
     // all-channels filter so install-by-tag works regardless of the GUI's
     // current display preference.
     let any = ChannelFilter { release: true, beta: true, nightly: true };
-    list_releases_streaming(500, None, None, any, None, |_| {}).await?
+    list_releases_streaming(500, None, None, any, None, None, |_| {}).await?
         .into_iter()
         .find(|r| r.tag == tag)
         .ok_or_else(|| anyhow!("release tag not found: {tag}"))

@@ -2348,6 +2348,9 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
     let slot          = state.slots.available.clone();
     let partial_slot  = state.slots.partial_releases.clone();
     let token         = state.github_token.clone();
+    // The fetch runs on the runtime, so it needs its own handle to log
+    // progress — everything it emits lands in the Console tab live.
+    let console       = state.console.clone();
     // When the user has set a `from` date, pass it as `stop_at` so the
     // fetcher halts once it has reached that date — saves API calls when
     // the user only cares about a recent date window.
@@ -2416,22 +2419,22 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         let dl_idx = super::state::read_downloads_index();
         let result = if !need_deeper_walk {
             versions::github::list_nightly_releases_streaming_incremental(
-                count, tok, stop_at, filter, &known,
+                count, tok, stop_at, filter, &known, Some(&console),
                 |partial| {
                     let rows = to_rows(partial, &dl_idx);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
                 .map(|rs| to_rows(rs, &dl_idx))
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("{e:#}"))
         } else {
             versions::github::list_nightly_releases_streaming(
-                count, tok, stop_at, filter,
+                count, tok, stop_at, filter, Some(&console),
                 |partial| {
                     let rows = to_rows(partial, &dl_idx);
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
                 .map(|rs| to_rows(rs, &dl_idx))
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("{e:#}"))
         };
         *slot.lock().unwrap() = Some(result);
     });

@@ -336,7 +336,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.rt.spawn(async move {
                     let result = profile::seed::seed_lists_with_console(
                         &prof, &tag, Some(cons)).await
-                        .map_err(|e| e.to_string());
+                        .map_err(|e| format!("{e:#}"));
                     *slot.lock().unwrap() = Some(result);
                 });
             }
@@ -494,7 +494,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                 let slot = state.slots.apply_done.clone();
                                 state.rt.spawn(async move {
                                     let result = lists::apply::apply_and_relaunch(&prof, &tag).await
-                                        .map_err(|e| e.to_string());
+                                        .map_err(|e| format!("{e:#}"));
                                     *slot.lock().unwrap() = Some(result);
                                 });
                             } else {
