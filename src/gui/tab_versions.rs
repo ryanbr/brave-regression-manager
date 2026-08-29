@@ -2036,8 +2036,13 @@ struct ReportData {
     bad_date:   String,
     older:      String,
     newer:      String,
+    /// Effective Chromium compare endpoints — the user's override row
+    /// when they've edited it, otherwise the auto-parsed pins.
     older_chr:  Option<String>,
     newer_chr:  Option<String>,
+    /// True when the two above came from the override row and differ
+    /// from the auto-parsed pins shown in the GOOD / BAD table.
+    chr_adjusted: bool,
     others:     Vec<(String, Verdict, String, String)>,
 }
 
@@ -2053,18 +2058,50 @@ fn collect_report_data(
     newer_chr: &Option<String>,
     row_by_tag: &std::collections::HashMap<String, (Option<String>, String)>,
 ) -> ReportData {
+    // Same fallback shape as `lookup_chr` in the bracket panel, and for
+    // the same reason: an Available row can exist for the tag while
+    // carrying no parsed Chromium version, because
+    // `spawn_tag_metadata_fetch` upserts what it fetches into sqlite and
+    // never writes back into `state.available`. Falling back on the
+    // row's mere presence (`.cloned().or_else(..)`) would print
+    // `Chromium -` in the table while the compare URL two lines below
+    // printed the very pin the fetch just stored. Per-field, and lazy —
+    // the sqlite read only happens when something is actually missing.
     let lookup_meta = |tag: &str| -> (String, String) {
-        let (chr, pa) = row_by_tag.get(tag).cloned()
-            .or_else(|| {
-                let m = verdict::tag_metadata(tag);
-                Some((m.0, m.1.unwrap_or_default()))
-            })
-            .unwrap_or_default();
+        let row = row_by_tag.get(tag);
+        let mut chr = row.and_then(|(c, _)| c.clone());
+        let mut pa  = row.map(|(_, p)| p.clone()).filter(|s| !s.is_empty());
+        if chr.is_none() || pa.is_none() {
+            let (m_chr, m_pa, _) = verdict::tag_metadata(tag);
+            if chr.is_none() { chr = m_chr; }
+            if pa.is_none()  { pa  = m_pa;  }
+        }
+        let pa = pa.unwrap_or_default();
         let date = pa.get(..10).unwrap_or(&pa).to_string();
         (chr.unwrap_or_default(), date)
     };
     let (good_chr, good_date) = lookup_meta(good);
     let (bad_chr,  bad_date)  = lookup_meta(bad);
+
+    // The report's Chromium compare URL has to be the one "Open compare"
+    // would open. The override row exists precisely because Brave's exact
+    // pin often isn't a tagged ref on chromium/chromium, so the user
+    // nudges either side to a nearby tagged milestone; reporting the raw
+    // auto-parsed pins would paste a 404 into the issue. Falls back to the
+    // auto pins when the user hasn't touched the row (or on the first
+    // frame, before the row below has seeded its entry).
+    let non_empty = |s: &str| {
+        let t = s.trim();
+        if t.is_empty() { None } else { Some(t.to_string()) }
+    };
+    let key = (channel.to_string(), older.to_string(), newer.to_string());
+    let (eff_older_chr, eff_newer_chr) = match state.chromium_overrides.get(&key) {
+        Some((a, b)) => (non_empty(a), non_empty(b)),
+        None         => (older_chr.clone(), newer_chr.clone()),
+    };
+    // Flagged in the output when the compare range no longer matches the
+    // pins in the table above it — otherwise the two silently disagree.
+    let chr_adjusted = (&eff_older_chr, &eff_newer_chr) != (older_chr, newer_chr);
 
     let verdicts_by_tag = verdict::all_version_verdicts();
     let mut others: Vec<(String, Verdict, String, String)> = Vec::new();
@@ -2084,8 +2121,9 @@ fn collect_report_data(
         good: good.to_string(), bad: bad.to_string(),
         good_chr, good_date, bad_chr, bad_date,
         older: older.to_string(), newer: newer.to_string(),
-        older_chr: older_chr.clone(),
-        newer_chr: newer_chr.clone(),
+        older_chr: eff_older_chr,
+        newer_chr: eff_newer_chr,
+        chr_adjusted,
         others,
     }
 }
@@ -2116,12 +2154,14 @@ fn render_report_markdown(d: &ReportData) -> String {
         "- brave-core: https://github.com/brave/brave-core/compare/{}...{}",
         d.older, d.newer);
     if let (Some(a), Some(b)) = (&d.older_chr, &d.newer_chr) {
+        let note = if d.chr_adjusted { " *(adjusted to tagged milestones)*" }
+                   else               { "" };
         if a != b {
             let _ = writeln!(out,
-                "- Chromium:   https://github.com/chromium/chromium/compare/{a}...{b}");
+                "- Chromium:   https://github.com/chromium/chromium/compare/{a}...{b}{note}");
         } else {
             let _ = writeln!(out,
-                "- Chromium:   {a} (unchanged across the bracket)");
+                "- Chromium:   {a} (unchanged across the bracket){note}");
         }
     }
     if !d.others.is_empty() {
@@ -2171,12 +2211,14 @@ fn render_report_plain(d: &ReportData) -> String {
         "  brave-core: https://github.com/brave/brave-core/compare/{}...{}",
         d.older, d.newer);
     if let (Some(a), Some(b)) = (&d.older_chr, &d.newer_chr) {
+        let note = if d.chr_adjusted { " (adjusted to tagged milestones)" }
+                   else               { "" };
         if a != b {
             let _ = writeln!(out,
-                "  Chromium:   https://github.com/chromium/chromium/compare/{a}...{b}");
+                "  Chromium:   https://github.com/chromium/chromium/compare/{a}...{b}{note}");
         } else {
             let _ = writeln!(out,
-                "  Chromium:   {a} (unchanged across the bracket)");
+                "  Chromium:   {a} (unchanged across the bracket){note}");
         }
     }
     if !d.others.is_empty() {
@@ -2855,17 +2897,26 @@ pub(super) fn launch_failure_hint(raw: &str) -> Option<&'static str> {
     None
 }
 
-/// True when `asset_name` clearly targets the opposite CPU architecture
-/// of the running host — used to defend against a stale releases.json
+/// True when `asset_name` clearly targets an architecture the running
+/// host cannot execute — used to defend against a stale releases.json
 /// cache where the OLD Windows picker selected an arm64 zip on an x64
-/// host. Conservative: only flags names with explicit arm/x64 markers.
+/// host. Conservative: only flags names with explicit arm markers.
+///
+/// One direction only. An ARM PE will not load on x64 (the loader
+/// fails with ERROR_EXE_MACHINE_TYPE_MISMATCH), so an arm64 asset on
+/// an x64 host really is unusable. The reverse is not: Windows 11 on
+/// ARM emulates x64, and `github::pick_for_host` *deliberately* ends
+/// its ARM-host order with the x64 zip for the tags where Brave
+/// shipped no arm64 build. Flagging those would hard-disable Install
+/// on exactly the rows that fallback exists to serve — and the
+/// disabled hint ("refresh the cache") cannot help, because a refresh
+/// re-picks the same x64 asset. Before the native
+/// aarch64-pc-windows-msvc build shipped, ARM users ran the x64
+/// binary, so `consts::ARCH` was "x86_64" and this never fired.
 fn is_opposite_arch_asset(asset_name: &str) -> bool {
+    if std::env::consts::ARCH == "aarch64" { return false; }
     let l = asset_name.to_lowercase();
-    let host_arch = std::env::consts::ARCH;
-    let host_arm = host_arch == "aarch64";
-    let asset_arm = l.contains("arm64") || l.contains("aarch64") || l.contains("-arm");
-    let asset_x64 = (l.contains("x64") || l.contains("amd64")) && !asset_arm;
-    if host_arm { asset_x64 } else { asset_arm }
+    l.contains("arm64") || l.contains("aarch64") || l.contains("-arm")
 }
 
 /// Wipe every file in `cache/downloads/` AND `cache/extracted/`.

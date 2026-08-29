@@ -63,24 +63,37 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // each frame. Without this, every entry was format!()'d and
     // laid out per paint regardless of visibility — at thousands
     // of entries that's hundreds of KB of allocation per frame.
-    let total = state.console.lock().map(|g| g.len()).unwrap_or(0);
+    //
+    // The lock is taken ONCE, before the row count is read, and held
+    // across the closure. The buffer is a 1000-entry ring that
+    // background threads push into (and "Clear Console" empties), so
+    // reading `len()` under one lock and the rows under another lets
+    // entries shift out from under the indices egui hands back — every
+    // visible row would show its neighbour, or the panel would paint
+    // blank while the scrollbar still claimed 1000 rows. Lock duration
+    // is bounded by the closure (sync rendering); nothing inside it
+    // pushes to the Console, so there is no re-entrancy.
+    let Ok(g) = state.console.lock() else { return };
+    let total = g.len();
     if total == 0 {
         super::app::weak_label(ui, "(no console output yet)");
         return;
     }
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
-    egui::ScrollArea::vertical()
+    // `show_rows` promises egui that every row is exactly `row_h`
+    // tall — it reserves `range.start * row_h` of spacer above and
+    // `(total - range.end) * row_h` below, then paints the rest. A
+    // wrapped label breaks that promise: it paints two-plus lines into
+    // a one-line budget, dragging every row after it out of step with
+    // the scrollbar and, under stick_to_bottom, shoving the newest
+    // entries below the visible area. Console lines are routinely
+    // wider than the window (asset URLs, raw Brave stderr), so extend
+    // rather than wrap, and give the area a horizontal scrollbar so
+    // the overflow is still reachable.
+    egui::ScrollArea::both()
         .auto_shrink([false; 2])
         .stick_to_bottom(true)
         .show_rows(ui, row_h, total, |ui, range| {
-            // Lock the Console once per visible-rows render.
-            // VecDeque::get is O(1), so the per-row index access
-            // is cheap. Lock duration is bounded by the closure
-            // (sync rendering).
-            let g = match state.console.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
             for i in range {
                 let Some(e) = g.get(i) else { continue };
                 let (color, prefix) = match e.level {
@@ -91,7 +104,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 };
                 let ts = e.ts.format("%H:%M:%S").to_string();
                 let line = format!("{ts}  {prefix}  [{}]  {}", e.source, e.msg);
-                ui.label(RichText::new(line).monospace().color(color));
+                ui.add(egui::Label::new(
+                    RichText::new(line).monospace().color(color))
+                    .wrap(false));
             }
         });
 }
