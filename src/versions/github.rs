@@ -419,6 +419,41 @@ pub fn pick_asset(release: &Release) -> Result<&ReleaseAsset> {
     pick_asset_for(release, channel)
 }
 
+/// The user's architecture preference, mirrored here so the pickers can
+/// read it without threading a parameter through every call site.
+///
+/// `AtomicU8` rather than the `OnceLock` used for the versions-dir
+/// override, because this one is toggled live from Settings and every
+/// cached pick has to be redone the moment it changes.
+static ARCH_PREF: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_arch_preference(p: crate::config::ArchPreference) {
+    use crate::config::ArchPreference as A;
+    let v = match p { A::Auto => 0, A::NativeOnly => 1, A::PreferX64 => 2 };
+    ARCH_PREF.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn arch_preference() -> crate::config::ArchPreference {
+    use crate::config::ArchPreference as A;
+    match ARCH_PREF.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => A::NativeOnly,
+        2 => A::PreferX64,
+        _ => A::Auto,
+    }
+}
+
+/// Identifies the inputs a cached `host_asset` was chosen under. A row
+/// whose stored key differs from this is re-picked from its stored
+/// asset list. Covers both the host architecture (an ARM build
+/// inheriting an x64 build's cache) and the preference above.
+pub fn current_pick_key() -> String {
+    use crate::config::ArchPreference as A;
+    let pref = match arch_preference() {
+        A::Auto => "auto", A::NativeOnly => "native", A::PreferX64 => "x64",
+    };
+    format!("{}:{pref}", std::env::consts::ARCH)
+}
+
 /// Re-run the host asset pick against an already-known asset list.
 ///
 /// The picked asset is host-architecture-specific, but a cached
@@ -545,11 +580,25 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
     // didn't ship an x64 build for that tag (some recent nightlies
     // shipped arm-only), return None — surfaces as "no installer" in
     // the GUI rather than silently installing an unrunnable binary.
+    use crate::config::ArchPreference as A;
+    let pref = arch_preference();
     let order: Vec<&dyn Fn(&str) -> bool> = if want_arm {
-        // ARM host: prefer arm, then any-arch zip, then arm exe;
-        // finally fall back to x64 (works under Win11-on-ARM emu).
-        vec![&zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm,
-             &zip_x64, &silent_standalone_x64, &standalone_x64]
+        match pref {
+            // x64 first, native only as a last resort — for reproducing
+            // a bug under emulation deliberately.
+            A::PreferX64 => vec![
+                &zip_x64, &silent_standalone_x64, &standalone_x64,
+                &zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm],
+            // No x64 tail: a tag with no ARM build must report "no
+            // installer" rather than silently hand back an emulated one.
+            A::NativeOnly => vec![
+                &zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm],
+            // ARM host: prefer arm, then any-arch zip, then arm exe;
+            // finally fall back to x64 (works under Win11-on-ARM emu).
+            A::Auto => vec![
+                &zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm,
+                &zip_x64, &silent_standalone_x64, &standalone_x64],
+        }
     } else {
         // x64 host: x64 only. No cross-arch fallback.
         vec![&zip_x64, &zip_any, &silent_standalone_x64, &standalone_x64]
@@ -602,9 +651,20 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
         n.ends_with(".dmg") && name_compatible(n, channel)
     };
 
-    let order: [&dyn Fn(&str) -> bool; 7] = if want_arm
-        { [&zip_arm, &zip_any, &dmg_arm, &dmg_uni, &dmg_any, &dmg_x64, &zip_x64] }
-        else { [&zip_x64, &zip_any, &dmg_x64, &dmg_uni, &dmg_any, &dmg_arm, &zip_arm] };
+    use crate::config::ArchPreference as A;
+    let order: Vec<&dyn Fn(&str) -> bool> = if want_arm {
+        match arch_preference() {
+            // Rosetta 2 plays the part Windows-on-ARM emulation does.
+            A::PreferX64  => vec![&zip_x64, &dmg_x64, &zip_any, &dmg_uni,
+                                  &dmg_any, &zip_arm, &dmg_arm],
+            A::NativeOnly => vec![&zip_arm, &zip_any, &dmg_arm, &dmg_uni,
+                                  &dmg_any],
+            A::Auto       => vec![&zip_arm, &zip_any, &dmg_arm, &dmg_uni,
+                                  &dmg_any, &dmg_x64, &zip_x64],
+        }
+    } else {
+        vec![&zip_x64, &zip_any, &dmg_x64, &dmg_uni, &dmg_any, &dmg_arm, &zip_arm]
+    };
     for matcher in order {
         if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
     }

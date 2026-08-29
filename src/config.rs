@@ -24,6 +24,11 @@ pub struct Gui {
     /// Personal access token (no scopes needed) — bumps GitHub's anonymous
     /// 60 req/hr ceiling to 5,000 req/hr. Empty string disables.
     #[serde(default)] pub github_token: String,
+    /// Which CPU architecture's Brave build to install when the host can
+    /// run more than one. Only meaningful on an ARM host with an
+    /// emulation layer — Windows 11 on ARM emulates x64, macOS has
+    /// Rosetta 2. ARM Linux has neither, so this is inert there.
+    #[serde(default)] pub arch_preference: ArchPreference,
     /// When true, every Brave launch passes `--disable-component-update`
     /// plus the poisoned-URL flag so adblock components stay pinned.
     /// Default OFF — most workflows want fresh components on launch.
@@ -144,6 +149,7 @@ impl Default for Gui {
             date_to:   String::new(),
             brave_log_level: BraveLogLevel::default(),
             github_token: String::new(),
+            arch_preference: ArchPreference::default(),
             freeze_components: false,
             block_drive_launcher: true,
             suppress_p3a_banner: true,
@@ -169,6 +175,35 @@ impl Default for Gui {
             settings_location: "versions".into(),
         }
     }
+}
+
+/// Architecture choice for hosts that can run more than one build.
+///
+/// Which build is running is itself a variable when bisecting: a
+/// regression that reproduces under x64 emulation may not reproduce on
+/// the native ARM build, and vice versa. Auto is the sane default, but
+/// pinning either way lets a bisect hold that variable still.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ArchPreference {
+    /// Native build, falling back to x64 when the release shipped no
+    /// ARM asset. What the picker has always done.
+    #[default] Auto,
+    /// Native only. A tag with no ARM build reports "no installer"
+    /// rather than quietly installing an emulated x64 one.
+    NativeOnly,
+    /// Prefer x64 even when a native build exists.
+    PreferX64,
+}
+impl ArchPreference {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Auto       => "Auto (native, fall back to x64)",
+            Self::NativeOnly => "Native only",
+            Self::PreferX64  => "Prefer x86-64",
+        }
+    }
+    pub const ALL: [ArchPreference; 3] =
+        [Self::Auto, Self::NativeOnly, Self::PreferX64];
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

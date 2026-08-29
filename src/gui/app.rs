@@ -228,6 +228,10 @@ impl App {
         state.date_to   = parse_date(&cfg.gui.date_to).map(clamp_loaded_date);
         state.brave_log_level = cfg.gui.brave_log_level;
         state.github_token    = cfg.gui.github_token.clone();
+        state.arch_preference = cfg.gui.arch_preference;
+        // Into the pickers before any cache work — the startup re-pick
+        // below compares against a key that encodes this.
+        crate::versions::github::set_arch_preference(state.arch_preference);
         state.freeze_components = cfg.gui.freeze_components;
         state.block_drive_launcher = cfg.gui.block_drive_launcher;
         state.suppress_p3a_banner = cfg.gui.suppress_p3a_banner;
@@ -319,7 +323,8 @@ impl App {
              suppress_p3a_banner={}  auto_open_url={}  \
              versions_dir={}  default_profile_folder={}  default_args={}  \
              clean_profile_per_launch={}  reuse_clean_profile={}  \
-             launch_as_admin={}  github_token={}  settings_location={}",
+             launch_as_admin={}  github_token={}  arch_pref={}  \
+             settings_location={}",
             state.theme, chans, state.release_count, date_filter,
             state.brave_log_level, state.freeze_components, state.block_drive_launcher,
             state.suppress_p3a_banner,
@@ -330,7 +335,8 @@ impl App {
             },
             versions_dir_str, prof_dir, def_args,
             state.clean_profile_per_launch, state.reuse_clean_profile,
-            state.launch_as_admin, token_str, state.settings_location));
+            state.launch_as_admin, token_str,
+            state.arch_preference.label(), state.settings_location));
         // Defer the heavy startup work — releases.json read + JSON
         // parse + (incremental) sqlite merge — to a background tokio
         // task so the window paints immediately. Drain block in
@@ -417,6 +423,7 @@ impl App {
         cfg.gui.date_to   = self.state.date_to.map(|d| d.to_string()).unwrap_or_default();
         cfg.gui.brave_log_level = self.state.brave_log_level;
         cfg.gui.github_token    = self.state.github_token.clone();
+        cfg.gui.arch_preference = self.state.arch_preference;
         cfg.gui.freeze_components = self.state.freeze_components;
         cfg.gui.block_drive_launcher = self.state.block_drive_launcher;
         cfg.gui.suppress_p3a_banner = self.state.suppress_p3a_banner;

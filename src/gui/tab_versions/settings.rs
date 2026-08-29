@@ -514,6 +514,69 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                 }
                 ui.end_row();
 
+                // Only an ARM host with an emulation layer has a choice
+                // to make: Windows 11 on ARM emulates x64 and macOS has
+                // Rosetta 2. On x64 there is no alternative build, and
+                // ARM Linux can't run one, so the row would be inert.
+                if std::env::consts::ARCH == "aarch64"
+                    && cfg!(any(windows, target_os = "macos"))
+                {
+                    ui.label("Build architecture:").on_hover_text(
+                        "Which Brave build to install on this ARM machine. \
+                         Auto takes the native ARM build and falls back to \
+                         x86-64 (run under emulation) for releases that \
+                         shipped no ARM asset. Native only reports those \
+                         releases as having no installer instead. Prefer \
+                         x86-64 takes the emulated build even when a \
+                         native one exists.\n\nWhich build is running is \
+                         itself a variable when bisecting — a regression \
+                         may reproduce under emulation but not natively. \
+                         Changing this re-picks every cached release.");
+                    let before = state.arch_preference;
+                    egui::ComboBox::from_id_source("arch_pref")
+                        .selected_text(state.arch_preference.label())
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            for p in crate::config::ArchPreference::ALL {
+                                ui.selectable_value(
+                                    &mut state.arch_preference, p, p.label());
+                            }
+                        });
+                    if state.arch_preference != before {
+                        state.config_dirty = true;
+                        crate::versions::github::set_arch_preference(
+                            state.arch_preference);
+                        // Every cached row's host_asset was chosen under
+                        // the old preference, and the incremental fetch
+                        // would short-circuit straight past them — so
+                        // redo the picks here, from the stored asset
+                        // lists, and persist.
+                        let mut rows = (*state.available).clone();
+                        let mut repicked = 0usize;
+                        let mut stale = 0usize;
+                        for r in &mut rows {
+                            if r.repick_for_host_arch() {
+                                repicked += 1;
+                                if let Ok(j) = serde_json::to_string(&r) {
+                                    let _ = crate::verdict::upsert_release_cache_row(
+                                        &r.tag, &j);
+                                }
+                            } else if r.needs_asset_backfill() {
+                                stale += 1;
+                            }
+                        }
+                        state.available = std::sync::Arc::new(rows);
+                        let tail = if stale > 0 {
+                            format!("; {stale} row(s) predate the stored asset \
+                                     list — re-fetch to update those")
+                        } else { String::new() };
+                        crate::console::info(&state.console, "config", format!(
+                            "arch_preference: {} ({repicked} release(s) \
+                             re-picked{tail})", state.arch_preference.label()));
+                    }
+                    ui.end_row();
+                }
+
                 // Discoverable mirror of the Available header's
                 // Clear -> Remove Cached files action — same behaviour
                 // (wipes everything under <data-root>/cache/downloads/),

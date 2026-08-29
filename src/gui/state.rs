@@ -123,10 +123,11 @@ pub struct ReleaseRow {
     /// re-picked and need one fetch to backfill.
     #[serde(default)]
     pub assets: Vec<crate::versions::github::ReleaseAsset>,
-    /// `std::env::consts::ARCH` of the build that chose `host_asset`.
-    /// Empty for rows cached before this existed.
+    /// Identifies the inputs `host_asset` was chosen under — host
+    /// architecture plus the user's architecture preference. Empty for
+    /// rows cached before this existed. See `github::current_pick_key`.
     #[serde(default)]
-    pub picked_arch: String,
+    pub pick_key: String,
     /// True when the asset is already downloaded to the cache directory at
     /// the expected size — install can skip the download and go straight to
     /// extract. Computed at fetch time and refreshed after each install /
@@ -212,9 +213,10 @@ impl ReleaseRow {
     /// persist a channel string. Brave's portable `.zip` filenames carry
     /// no channel marker, so unmarked rows stay `?` until the next fetch
     /// re-derives the channel from the full asset list.
-    /// Redo the host asset pick if this row was cached by a build running
-    /// on a different CPU architecture. Returns true when it changed
-    /// something, so the caller can re-persist.
+    /// Redo the host asset pick when the inputs behind it have changed —
+    /// a different host architecture, or a different Settings
+    /// architecture preference. Returns true when it changed something,
+    /// so the caller can re-persist.
     ///
     /// Until v0.9.1 there was no ARM Windows build, so an ARM machine ran
     /// the x64 binary and cached the x64 zip for every tag. The
@@ -226,7 +228,9 @@ impl ReleaseRow {
     /// cannot be corrected here; `needs_asset_backfill` spots those and
     /// forces one full walk to repopulate them.
     pub fn repick_for_host_arch(&mut self) -> bool {
-        if self.picked_arch == std::env::consts::ARCH { return false; }
+        if self.pick_key == crate::versions::github::current_pick_key() {
+            return false;
+        }
         if self.assets.is_empty() { return false; }
         let ch = crate::versions::github::channel_from_label(&self.channel);
         match crate::versions::github::pick_host_asset(&self.assets, ch) {
@@ -243,14 +247,15 @@ impl ReleaseRow {
                 self.skip_reason = "no installer for this platform".to_string();
             }
         }
-        self.picked_arch = std::env::consts::ARCH.to_string();
+        self.pick_key = crate::versions::github::current_pick_key();
         true
     }
 
     /// True when this row predates the stored-asset cache and was picked
     /// by a different architecture — it can only be fixed by refetching.
     pub fn needs_asset_backfill(&self) -> bool {
-        self.assets.is_empty() && self.picked_arch != std::env::consts::ARCH
+        self.assets.is_empty()
+            && self.pick_key != crate::versions::github::current_pick_key()
     }
 
     pub fn ensure_channel(&mut self) {
@@ -532,6 +537,10 @@ pub struct AppState {
     pub rt:      Handle,
     pub slots:   AsyncSlots,
     pub console: crate::console::Handle,
+    /// Which architecture's build to install where the host can run more
+    /// than one. Mirrored into `github::set_arch_preference` so the
+    /// pickers see it.
+    pub arch_preference: crate::config::ArchPreference,
     /// Widest content the Console viewport has actually painted, in
     /// points. `max_line_chars` x glyph-width is only an estimate — it
     /// assumes every glyph has the monospace advance, which fails for
@@ -565,6 +574,7 @@ impl AppState {
         Self {
             console,
             console_content_w: 0.0,
+            arch_preference: crate::config::ArchPreference::default(),
             console_last_max_chars: 0,
             tab: Tab::Versions,
             installed: std::sync::Arc::new(vec![]),

@@ -1980,7 +1980,7 @@ fn spawn_add_by_tag(state: &mut AppState, tag: String) {
                     host_asset: r.host_asset, asset_url, asset_size,
                     skip_reason, cached: false, channel, chromium_version,
                     assets: r.assets,
-                    picked_arch: std::env::consts::ARCH.to_string(),
+                    pick_key: versions::github::current_pick_key(),
                 };
                 row.refresh_cached();
                 if let Ok(json) = serde_json::to_string(&row) {
@@ -2391,7 +2391,7 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     // architecture can redo the pick without a
                     // network call.
                     assets: r.assets,
-                    picked_arch: std::env::consts::ARCH.to_string(),
+                    pick_key: versions::github::current_pick_key(),
                 };
                 row.refresh_cached_with(dl_idx);
                 if let Ok(json) = serde_json::to_string(&row) {
