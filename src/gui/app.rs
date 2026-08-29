@@ -99,6 +99,21 @@ pub struct App {
 /// actionable hint when we recognise one. Same shape as the install /
 /// launch hint helpers — purely additive context, the raw error
 /// stays visible either way.
+/// Flatten a status message onto one line.
+///
+/// The bottom status panel is always present specifically so the
+/// central panel never reflows, and it renders `status_msg` with a
+/// plain `ui.label` — which breaks on an explicit `\n` whatever the
+/// wrap mode. Error text reaches it as `{e:#}`, and an octocrab
+/// `GitHubError` appends "\nDocumentation URL: …" on 401/403/404, so
+/// without this the panel silently grows a second row on exactly the
+/// failures the user is trying to read. Borrows in the common case;
+/// the full text stays intact in the Console, which splits per line.
+fn status_line(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\n') { std::borrow::Cow::Owned(s.replace('\n', " — ")) }
+    else                 { std::borrow::Cow::Borrowed(s) }
+}
+
 fn fetch_failure_hint(raw: &str) -> Option<&'static str> {
     let lc = raw.to_lowercase();
     // 401. A token that has been revoked, deleted, or has expired —
@@ -110,7 +125,18 @@ fn fetch_failure_hint(raw: &str) -> Option<&'static str> {
     // also applied to the regional-catalog result, whose parse failures
     // read "<url> parse: … at line N column M" — a catalog that fails at
     // line 401 would otherwise be reported as a revoked token.
-    if lc.contains("bad credentials") || lc.contains("requires authentication") {
+    // Two wordings, two transports. octocrab surfaces GitHub's JSON
+    // message ("Bad credentials"); the reqwest paths
+    // (fetch_release_by_tag, fetch_release_metadata, compare_commits)
+    // never parse the body and report `HTTP 401 Unauthorized` instead.
+    // Anchored either way — a bare "401" would match the "at line 401
+    // column N" tail of a serde error from the regional catalog, which
+    // shares this hint function.
+    if lc.contains("bad credentials")
+        || lc.contains("requires authentication")
+        || lc.contains("http 401")
+        || lc.contains("401 unauthorized")
+    {
         return Some("GitHub rejected the token being used: it has been \
                      revoked, deleted, or expired. The token comes from \
                      Settings -> GitHub token, or from a GITHUB_TOKEN \
@@ -784,7 +810,7 @@ impl eframe::App for App {
                 .inner_margin(egui::Margin::symmetric(6.0, 2.0)))
             .show_separator_line(false)
             .show(ctx, |ui| {
-                ui.label(&self.state.status_msg);
+                ui.label(status_line(&self.state.status_msg).as_ref());
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.state.tab {

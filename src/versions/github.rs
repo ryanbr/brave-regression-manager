@@ -227,12 +227,6 @@ async fn list_releases_streaming(
             }
         },
     };
-    if let Some(t) = chosen_token {
-        builder = builder.personal_token(t);
-    }
-    let octo = builder.build()
-        .map_err(|e| anyhow::Error::new(e).context("building the GitHub client"))?;
-
     let target = count.max(1) as usize;
     // 200 * 100 = 20 000 raw releases — easily covers Brave's whole
     // GitHub release history (≈ 7+ years). Either the target count,
@@ -252,6 +246,12 @@ async fn list_releases_streaming(
     if filter.release { channels.push("Release"); }
     if filter.beta    { channels.push("Beta"); }
     if filter.nightly { channels.push("Nightly"); }
+    // Emitted BEFORE the client is built. personal_token() on a PAT
+    // pasted with a trailing newline or a stray non-ASCII character
+    // fails in build() with InvalidHeaderValue, and logging afterwards
+    // meant the one failure that is unambiguously token-shaped produced
+    // no auth line at all — while the 401 hint tells the user this line
+    // names which token was sent.
     log(format!(
         "fetch start: auth={auth_label}, target={effective_target}, \
          channels=[{}], stop_at={}, incremental={}",
@@ -259,6 +259,12 @@ async fn list_releases_streaming(
         stop_at.map(|d| d.to_string()).unwrap_or_else(|| "none".into()),
         known_tags.map(|k| format!("yes ({} known tags)", k.len()))
             .unwrap_or_else(|| "no (full walk)".into())));
+
+    if let Some(t) = chosen_token {
+        builder = builder.personal_token(t);
+    }
+    let octo = builder.build()
+        .map_err(|e| anyhow::Error::new(e).context("building the GitHub client"))?;
 
     // Named so the "why did it stop" line at the end can't drift out of
     // sync with the breaks themselves — including the ceiling, which is
@@ -345,9 +351,17 @@ async fn list_releases_streaming(
         // all-channels filter — so attributing it to the filter would
         // name the one cause that is usually not responsible. Each of
         // those exits logs its own reason.
-        log(format!("page {page_num}: {page_items} releases, {} added \
-                     (running total {})",
-            out.len() - before, out.len()));
+        // Every page for the first ten, then every tenth. The ceiling is
+        // 200 pages and the console ring holds 1000 entries, so logging
+        // unconditionally could spend a fifth of the ring on one deep
+        // stop_at walk and evict the install / launch / Brave-stderr
+        // history it exists to sit alongside. Early pages are where the
+        // diagnostic value is; a long tail of them is just noise.
+        if page_num <= 10 || page_num % 10 == 0 {
+            log(format!("page {page_num}: {page_items} releases, {} added \
+                         (running total {})",
+                out.len() - before, out.len()));
+        }
         // Stop when we've reached our (uncapped if stop_at) target,
         // crossed the stop_at floor, or hit a known tag (incremental).
         if out.len() >= effective_target { stop_reason = "reached target".to_string(); break; }
@@ -577,7 +591,10 @@ pub async fn fetch_release_by_tag(tag: &str, token: Option<&str>) -> Result<Rele
         .get(&url)
         .header("Accept", "application/vnd.github+json");
     let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
+        // Empty means absent — otherwise this sends a bare
+        // `Authorization: Bearer` and earns a 401 that looks exactly
+        // like a revoked token. Same rule as list_releases_streaming.
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()));
     if let Some(t) = chosen {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
@@ -622,7 +639,10 @@ pub async fn fetch_release_metadata(tag: &str, token: Option<&str>)
         .get(&url)
         .header("Accept", "application/vnd.github+json");
     let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
+        // Empty means absent — otherwise this sends a bare
+        // `Authorization: Bearer` and earns a 401 that looks exactly
+        // like a revoked token. Same rule as list_releases_streaming.
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()));
     if let Some(t) = chosen {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
@@ -647,7 +667,10 @@ pub async fn compare_commits(base: &str, head: &str, token: Option<&str>) -> Res
         .get(&url)
         .header("Accept", "application/vnd.github+json");
     let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok());
+        // Empty means absent — otherwise this sends a bare
+        // `Authorization: Bearer` and earns a 401 that looks exactly
+        // like a revoked token. Same rule as list_releases_streaming.
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()));
     if let Some(t) = chosen {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
