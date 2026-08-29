@@ -641,6 +641,15 @@ pub struct AppState {
     /// than one. Mirrored into `github::set_arch_preference` so the
     /// pickers see it.
     pub arch_preference: crate::config::ArchPreference,
+    /// Keep repainting until this instant after a Brave exits, so the
+    /// last of its stderr can reach the Console.
+    ///
+    /// The reader is a separate thread on a blocking `lines()`, so lines
+    /// can still be draining when `running` empties and the repaint tier
+    /// that was carrying them stops. Without this they sit unrendered
+    /// until the next user input — and the output at risk is a crashing
+    /// Brave's final lines, which is the whole reason to be watching.
+    pub brave_drain_until: Option<std::time::Instant>,
     /// Set once a fetch has bypassed the incremental short-circuit to
     /// backfill asset lists, so that happens at most once per session.
     pub asset_backfill_attempted: bool,
@@ -679,6 +688,7 @@ impl AppState {
             console_content_w: 0.0,
             arch_preference: crate::config::ArchPreference::default(),
             asset_backfill_attempted: false,
+            brave_drain_until: None,
             console_last_max_chars: 0,
             tab: Tab::Versions,
             installed: std::sync::Arc::new(vec![]),

@@ -558,6 +558,12 @@ impl App {
                 // whether prefs (incl. custom adblock filter lists)
                 // actually flushed to disk.
                 self.probe_profile_persistence(&tag, &r.user_data_dir);
+                // Its stderr reader may still be draining. Hold a
+                // repaint tier open briefly so those lines land instead
+                // of waiting on the next mouse move.
+                self.state.brave_drain_until =
+                    Some(std::time::Instant::now()
+                         + std::time::Duration::from_secs(2));
             }
         }
     }
@@ -857,6 +863,17 @@ impl eframe::App for App {
             // Poll for externally-closed Brave windows ~twice a second so
             // the Stop button disappears without needing user input.
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        } else if self.state.brave_drain_until
+            .is_some_and(|t| std::time::Instant::now() < t)
+        {
+            // A Brave has just exited and its stderr reader may still be
+            // draining. Faster than the running tier because this is a
+            // short window and the lines in it are the interesting ones.
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        } else {
+            // Nothing in flight: no tier at all, so egui blocks on input
+            // and a genuinely idle window costs nothing.
+            self.state.brave_drain_until = None;
         }
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
