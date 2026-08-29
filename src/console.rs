@@ -22,19 +22,75 @@ pub struct Entry {
 pub struct ConsoleLog {
     entries:  VecDeque<Entry>,
     capacity: usize,
+    /// Widest `source + msg` ever pushed, in chars, for the panel's
+    /// horizontal scroll extent. That extent has to be stable across
+    /// frames: `ScrollArea::show_rows` only paints the visible subset,
+    /// so if those rows defined the content width it would collapse
+    /// whenever the viewport sat on short lines — egui clamps the
+    /// scroll offset to `content - viewport` every frame, snapping the
+    /// user back to column 0 mid-read. A ring eviction can
+    /// leave it wider than the widest surviving line only until that
+    /// line is itself evicted, which triggers a recompute.
+    max_line_chars: usize,
 }
 
 impl ConsoleLog {
     pub fn new(capacity: usize) -> Self {
-        Self { entries: VecDeque::with_capacity(capacity), capacity }
+        Self { entries: VecDeque::with_capacity(capacity), capacity,
+               max_line_chars: 0 }
     }
+    /// The panel renders one entry per `ScrollArea::show_rows` row and
+    /// budgets exactly one text-line of height for it. egui breaks on an
+    /// explicit `\n` whatever the wrap mode, so a multi-line message
+    /// would paint taller than its budget and shove every row after it
+    /// out of alignment — the same defect as wrapping, arriving by a
+    /// different route. Several failure paths do append a second line
+    /// (`format!("launch failed: {e}\nhint: {h}")` and friends), so
+    /// split at the door: one entry per line, sharing the timestamp.
     pub fn push(&mut self, e: Entry) {
-        if self.entries.len() == self.capacity { self.entries.pop_front(); }
+        if !e.msg.contains('\n') { return self.push_line(e); }
+        let Entry { ts, level, source, msg } = e;
+        for line in msg.split('\n') {
+            self.push_line(Entry {
+                ts, level,
+                source: source.clone(),
+                msg: line.to_string(),
+            });
+        }
+    }
+
+    /// Rendered width of one entry, in chars, excluding the panel's
+    /// fixed timestamp/level/source prefix.
+    fn width_of(e: &Entry) -> usize {
+        e.source.chars().count() + e.msg.chars().count()
+    }
+
+    /// Ring insert for one already-single-line entry.
+    fn push_line(&mut self, e: Entry) {
+        if self.entries.len() == self.capacity {
+            let evicted = self.entries.pop_front();
+            // Only the widest line leaving can lower the max, so the
+            // O(n) refold is rare rather than per-push. Without it the
+            // max is pinned by the widest line *ever* seen, and that is
+            // not a small overshoot: `--enable-logging=stderr --v=3`
+            // (a Settings option) emits stderr lines thousands of chars
+            // wide, which the 1000-entry ring drops within seconds —
+            // leaving the horizontal scrollbar a sliver over empty
+            // space for the rest of the session.
+            if evicted.as_ref().is_some_and(|old| Self::width_of(old) >= self.max_line_chars) {
+                self.max_line_chars =
+                    self.entries.iter().map(Self::width_of).max().unwrap_or(0);
+            }
+        }
+        self.max_line_chars = self.max_line_chars.max(Self::width_of(&e));
         self.entries.push_back(e);
     }
     pub fn entries(&self) -> impl Iterator<Item = &Entry> { self.entries.iter() }
     pub fn len(&self)   -> usize { self.entries.len() }
-    pub fn clear(&mut self)      { self.entries.clear(); }
+    pub fn clear(&mut self)      { self.entries.clear(); self.max_line_chars = 0; }
+    /// Widest `source + msg` seen since the last `clear()`, in chars.
+    /// The panel adds its own fixed prefix width on top.
+    pub fn max_line_chars(&self) -> usize { self.max_line_chars }
     /// O(1) index access by oldest-first position. Used by the
     /// Console panel's viewport-rendered ScrollArea so we can
     /// paint only the on-screen rows instead of laying out every

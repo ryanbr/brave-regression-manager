@@ -481,6 +481,21 @@ pub struct AppState {
     pub rt:      Handle,
     pub slots:   AsyncSlots,
     pub console: crate::console::Handle,
+    /// Widest content the Console viewport has actually painted, in
+    /// points. `max_line_chars` x glyph-width is only an estimate — it
+    /// assumes every glyph has the monospace advance, which fails for
+    /// any line the monospace face doesn't cover (the install line's
+    /// em-dash, a CJK path in Brave stderr) and those rows then paint
+    /// wider than the reserved extent. Taking a running max of what
+    /// egui reports back keeps the horizontal range monotonic, so it
+    /// can't collapse when a wide row scrolls out of view. Reset by
+    /// "Clear Console".
+    pub console_content_w: f32,
+    /// Last `ConsoleLog::max_line_chars()` the panel saw. When the ring
+    /// evicts its widest line the char floor drops, and the monotonic
+    /// `console_content_w` above would otherwise keep the old extent
+    /// alive forever — so a drop here releases the ratchet.
+    pub console_last_max_chars: usize,
 }
 
 pub struct RunningBrave {
@@ -498,6 +513,8 @@ impl AppState {
         let console = crate::console::new_handle();
         Self {
             console,
+            console_content_w: 0.0,
+            console_last_max_chars: 0,
             tab: Tab::Versions,
             installed: std::sync::Arc::new(vec![]),
             available: std::sync::Arc::new(vec![]),

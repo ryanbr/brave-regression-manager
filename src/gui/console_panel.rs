@@ -15,6 +15,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .clicked()
             {
                 if let Ok(mut g) = state.console.lock() { g.clear(); }
+                state.console_content_w = 0.0;
+                state.console_last_max_chars = 0;
             }
             // Copy the entire Console buffer to clipboard, in the
             // same `HH:MM:SS  LEVEL  [source]  msg` shape the panel
@@ -63,24 +65,73 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // each frame. Without this, every entry was format!()'d and
     // laid out per paint regardless of visibility — at thousands
     // of entries that's hundreds of KB of allocation per frame.
-    let total = state.console.lock().map(|g| g.len()).unwrap_or(0);
+    //
+    // The lock is taken ONCE, before the row count is read, and held
+    // across the closure. The buffer is a 1000-entry ring that
+    // background threads push into (and "Clear Console" empties), so
+    // reading `len()` under one lock and the rows under another lets
+    // entries shift out from under the indices egui hands back — every
+    // visible row would show its neighbour, or the panel would paint
+    // blank while the scrollbar still claimed 1000 rows. Lock duration
+    // is bounded by the closure (sync rendering); nothing inside it
+    // pushes to the Console, so there is no re-entrancy.
+    // A poisoned mutex must still say so: before this was a single
+    // lock the `unwrap_or(0)` fell through to the "(no console output
+    // yet)" label, and a bare `return` here would instead paint an
+    // unexplained empty tab. `console::push` swallows poison too, so
+    // logging is silently dead for the rest of the session — that is
+    // worth a visible marker rather than a blank panel.
+    let Ok(g) = state.console.lock() else {
+        super::app::weak_label(ui, "(console unavailable — internal lock poisoned)");
+        return;
+    };
+    let total = g.len();
     if total == 0 {
         super::app::weak_label(ui, "(no console output yet)");
         return;
     }
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
-    egui::ScrollArea::vertical()
+    // `show_rows` promises egui that every row is exactly `row_h`
+    // tall — it reserves `range.start * row_h` of spacer above and
+    // `(total - range.end) * row_h` below, then paints the rest. A
+    // wrapped label breaks that promise: it paints two-plus lines into
+    // a one-line budget, dragging every row after it out of step with
+    // the scrollbar and, under stick_to_bottom, shoving the newest
+    // entries below the visible area. Console lines are routinely
+    // wider than the window (asset URLs, raw Brave stderr), so extend
+    // rather than wrap, and give the area a horizontal scrollbar so
+    // the overflow is still reachable.
+    //
+    // That scrollbar needs a content width that does NOT depend on
+    // which rows happen to be on screen. egui derives content size from
+    // what the closure actually painted and re-clamps the scroll offset
+    // to it every frame, so with `show_rows` the horizontal extent
+    // would collapse the moment the viewport moved onto short lines —
+    // yanking the view back to column 0 while the user was reading a
+    // long URL, and resizing the scrollbar handle each frame. The ring
+    // tracks the widest line it has ever held, which gives a stable
+    // extent for the cost of one `max` per push.
+    let char_w = ui.fonts(|f| f.glyph_width(
+        &egui::TextStyle::Monospace.resolve(ui.style()), ' '));
+    // "HH:MM:SS" + 2 + "LEVEL" + 2 + "[" + "]" + 2 = 21 fixed chars
+    // around the per-entry `source` + `msg` the ring measured.
+    const PREFIX_CHARS: usize = 21;
+    // The char estimate is the floor; `console_content_w` is the running
+    // max of what egui actually laid out, which covers the glyphs the
+    // monospace face doesn't own and whose real advance is wider.
+    // A drop in the char floor means the ring evicted the widest line,
+    // so the painted-width ratchet is now holding an extent nothing on
+    // screen needs. Release it and let it rebuild from what's left.
+    let max_chars = g.max_line_chars();
+    if max_chars < state.console_last_max_chars { state.console_content_w = 0.0; }
+    state.console_last_max_chars = max_chars;
+    let content_w = ((max_chars + PREFIX_CHARS) as f32 * char_w)
+        .max(state.console_content_w);
+    let out = egui::ScrollArea::both()
         .auto_shrink([false; 2])
         .stick_to_bottom(true)
         .show_rows(ui, row_h, total, |ui, range| {
-            // Lock the Console once per visible-rows render.
-            // VecDeque::get is O(1), so the per-row index access
-            // is cheap. Lock duration is bounded by the closure
-            // (sync rendering).
-            let g = match state.console.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
+            ui.set_min_width(content_w);
             for i in range {
                 let Some(e) = g.get(i) else { continue };
                 let (color, prefix) = match e.level {
@@ -91,7 +142,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 };
                 let ts = e.ts.format("%H:%M:%S").to_string();
                 let line = format!("{ts}  {prefix}  [{}]  {}", e.source, e.msg);
-                ui.label(RichText::new(line).monospace().color(color));
+                ui.add(egui::Label::new(
+                    RichText::new(line).monospace().color(color))
+                    .wrap(false));
             }
         });
+    // Monotonic: never let the extent shrink back when a wide row
+    // scrolls out of the painted range, which is what makes egui clamp
+    // the user's horizontal offset to 0 mid-read.
+    drop(g);
+    state.console_content_w = state.console_content_w.max(out.content_size.x);
 }
