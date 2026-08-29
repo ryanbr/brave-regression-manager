@@ -361,6 +361,10 @@ pub fn expand_arch_rows(rows: Vec<ReleaseRow>, show_x86: bool) -> Vec<ReleaseRow
             out.push(v);
         }
     }
+    // Same reason: this Vec backs state.available for the process's
+    // lifetime, and the [x86] expansion pushes past the capacity it was
+    // built with, so it can end up holding close to double what it uses.
+    out.shrink_to_fit();
     out
 }
 
@@ -762,3 +766,4 @@ impl AppState {
         }
     }
 }
+

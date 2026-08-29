@@ -507,7 +507,14 @@ fn host_candidate_asset(name: &str) -> bool {
 /// The rule itself lives in `host_candidate_asset` so that the cache and
 /// the pickers cannot disagree about what is selectable.
 pub fn installer_assets(assets: &[ReleaseAsset]) -> Vec<ReleaseAsset> {
-    assets.iter().filter(|a| host_candidate_asset(&a.name)).cloned().collect()
+    let mut out: Vec<ReleaseAsset> = assets.iter()
+        .filter(|a| host_candidate_asset(&a.name)).cloned().collect();
+    // `collect` from a filter grows geometrically — Filter's size_hint
+    // lower bound is 0 — so an 8-element result can sit in a 16-slot
+    // allocation. This Vec is held for the process's lifetime on every
+    // cached row, so the slack is worth returning.
+    out.shrink_to_fit();
+    out
 }
 
 /// Re-run the host asset pick against an already-known asset list.

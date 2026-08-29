@@ -481,16 +481,29 @@ pub fn mark_release_cache_complete() -> Result<()> {
     Ok(())
 }
 
-/// Read every release JSON blob, newest tag last (lexicographic — the
-/// caller re-sorts). Empty Vec when the table is empty / unreadable.
-pub fn all_release_cache_rows() -> Vec<String> {
+/// Parse every cached release row, without materialising the JSON.
+///
+/// The previous shape collected every blob into a `Vec<String>` and the
+/// caller then parsed it — so a 4000-tag cache held the whole payload as
+/// strings AND the parsed rows at the same time, several MB of peak on
+/// the startup path. glibc does not necessarily return freed pages to
+/// the OS, so a peak like that can sit in RSS for the life of the
+/// process even though nothing references it.
+///
+/// `f` runs while the database mutex is held: it must parse and nothing
+/// else. Calling any other `verdict::` function from it deadlocks on the
+/// same connection.
+pub fn map_release_cache_rows<T>(mut f: impl FnMut(&str) -> Option<T>) -> Vec<T> {
     let conn = match open() { Ok(c) => c, Err(_) => return Vec::new() };
     let mut out = Vec::new();
     if let Ok(mut stmt) = conn.prepare("SELECT json FROM release_cache") {
         if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
-            out.extend(rows.filter_map(|r| r.ok()));
+            for json in rows.flatten() {
+                if let Some(v) = f(&json) { out.push(v); }
+            }
         }
     }
+    out.shrink_to_fit();
     out
 }
 
