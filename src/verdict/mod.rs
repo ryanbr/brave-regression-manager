@@ -481,26 +481,56 @@ pub fn mark_release_cache_complete() -> Result<()> {
     Ok(())
 }
 
-/// Parse every cached release row, without materialising the JSON.
+/// Parse every cached release row without materialising the whole
+/// payload, and without holding the database mutex across the parse.
 ///
-/// The previous shape collected every blob into a `Vec<String>` and the
-/// caller then parsed it — so a 4000-tag cache held the whole payload as
-/// strings AND the parsed rows at the same time, several MB of peak on
-/// the startup path. glibc does not necessarily return freed pages to
-/// the OS, so a peak like that can sit in RSS for the life of the
-/// process even though nothing references it.
+/// Two constraints pull against each other. Collecting every blob into a
+/// `Vec<String>` first meant the entire payload and the parsed rows were
+/// live at once — several MB of peak on the startup path, and glibc does
+/// not necessarily hand freed pages back, so that spike can sit in RSS
+/// for the life of the process. But parsing inside the query holds the
+/// process-global connection mutex across the deserialisation of every
+/// row, and the UI thread takes that same mutex once per rendered row
+/// per frame, so a startup scan would stall the window.
 ///
-/// `f` runs while the database mutex is held: it must parse and nothing
-/// else. Calling any other `verdict::` function from it deadlocks on the
-/// same connection.
+/// Batched keyset pagination gets both: the lock is held only long
+/// enough to read BATCH blobs, which are then parsed with it released.
+/// Peak is one batch rather than the whole cache.
+///
+/// Keyset (`tag > last`) rather than OFFSET so a concurrent insert
+/// between batches cannot make the scan skip or repeat a row.
 pub fn map_release_cache_rows<T>(mut f: impl FnMut(&str) -> Option<T>) -> Vec<T> {
-    let conn = match open() { Ok(c) => c, Err(_) => return Vec::new() };
+    const BATCH: i64 = 512;
     let mut out = Vec::new();
-    if let Ok(mut stmt) = conn.prepare("SELECT json FROM release_cache") {
-        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
-            for json in rows.flatten() {
-                if let Some(v) = f(&json) { out.push(v); }
-            }
+    let mut after = String::new();
+    loop {
+        // Scoped so the guard and the statement both drop before `f`
+        // runs — that is the whole point of the batching.
+        let batch: Vec<(String, String)> = {
+            let conn = match open() { Ok(c) => c, Err(_) => break };
+            let mut stmt = match conn.prepare_cached(
+                "SELECT tag, json FROM release_cache
+                 WHERE tag > ?1 ORDER BY tag LIMIT ?2")
+            {
+                Ok(st) => st,
+                Err(_)  => break,
+            };
+            let rows = match stmt.query_map(params![after, BATCH],
+                                            |r| Ok((r.get(0)?, r.get(1)?)))
+            {
+                Ok(rows) => rows,
+                Err(_)   => break,
+            };
+            // Bound to a local so the statement and guard drop at the
+            // end of this block; as a tail expression their temporaries
+            // would outlive it.
+            let batch: Vec<(String, String)> = rows.flatten().collect();
+            batch
+        };
+        let Some((last, _)) = batch.last() else { break };
+        after = last.clone();
+        for (_, json) in &batch {
+            if let Some(v) = f(json) { out.push(v); }
         }
     }
     out.shrink_to_fit();
