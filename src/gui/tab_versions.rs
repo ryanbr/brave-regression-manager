@@ -1462,9 +1462,13 @@ fn render_status_cell(
                             egui::Button::new(btn_label));
                         let btn_resp = if arch_mismatch {
                             btn_resp.on_disabled_hover_text(
-                                "Cached asset URL is the wrong architecture for \
-                                 this host. Click 'Fetch GitHub releases' to \
-                                 refresh the cache, then re-install.")
+                                "This release's asset is for a different CPU \
+                                 architecture and won't run on this host. \
+                                 Either the release shipped no build for your \
+                                 architecture — in which case there is nothing \
+                                 to install and you want a neighbouring tag — \
+                                 or the cached asset URL is stale, which a \
+                                 'Fetch GitHub releases' refresh will fix.")
                         } else if cap_reached && !already_installing {
                             btn_resp.on_disabled_hover_text(format!(
                                 "Already installing {} version(s) (cap = {}) — \
@@ -2094,9 +2098,19 @@ fn collect_report_data(
         let t = s.trim();
         if t.is_empty() { None } else { Some(t.to_string()) }
     };
+    // Per side, and each side falls back to its auto pin. An override
+    // side can be blank two ways — the user cleared that field, or the
+    // row seeded itself `("","")` because the pin wasn't known yet and a
+    // later "Fetch tag info" resolved it into sqlite without touching
+    // the entry. Letting a blank side win would drop the whole Chromium
+    // line from the report (it prints under `if let (Some, Some)`),
+    // including the "(adjusted)" marker — so the pasted issue would look
+    // like the bracket had no Chromium data at all, while the table two
+    // lines above listed both pins.
     let key = (channel.to_string(), older.to_string(), newer.to_string());
     let (eff_older_chr, eff_newer_chr) = match state.chromium_overrides.get(&key) {
-        Some((a, b)) => (non_empty(a), non_empty(b)),
+        Some((a, b)) => (non_empty(a).or_else(|| older_chr.clone()),
+                         non_empty(b).or_else(|| newer_chr.clone())),
         None         => (older_chr.clone(), newer_chr.clone()),
     };
     // Flagged in the output when the compare range no longer matches the
@@ -2887,6 +2901,24 @@ pub(super) fn launch_failure_hint(raw: &str) -> Option<&'static str> {
         return Some("the on-disk brave.exe is the wrong CPU architecture \
                      for this host. Uninstall (Del), then re-install — \
                      the picker now refuses cross-arch zips.");
+    }
+    // macOS: an x64 build on Apple Silicon needs Rosetta 2, which is NOT
+    // installed by default. The picker allows x64 on an ARM mac (the ARM
+    // order falls back to it when Brave shipped no arm64 asset), so this
+    // is reachable on a clean machine.
+    if lc.contains("bad cpu type") {
+        return Some("this build is x86_64 and needs Rosetta 2, which isn't \
+                     installed. Run `softwareupdate --install-rosetta` in \
+                     Terminal, or pick a tag with an arm64 asset.");
+    }
+    // Linux has no cross-arch emulation layer, so a mismatched ELF dies
+    // here rather than being caught by the Install-button guard (which
+    // does block it — this covers versions already on disk).
+    if lc.contains("exec format error") {
+        return Some("the installed Brave binary is built for a different \
+                     CPU architecture and Linux cannot emulate it. \
+                     Uninstall (Del) and pick a tag that ships a build for \
+                     this architecture.");
     }
     // Windows ERROR_FILE_NOT_FOUND (2) — usually means brave.exe wasn't
     // produced by extraction (missing top-level dir name change, etc.).

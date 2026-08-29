@@ -39,7 +39,28 @@ impl ConsoleLog {
         Self { entries: VecDeque::with_capacity(capacity), capacity,
                max_line_chars: 0 }
     }
+    /// The panel renders one entry per `ScrollArea::show_rows` row and
+    /// budgets exactly one text-line of height for it. egui breaks on an
+    /// explicit `\n` whatever the wrap mode, so a multi-line message
+    /// would paint taller than its budget and shove every row after it
+    /// out of alignment — the same defect as wrapping, arriving by a
+    /// different route. Several failure paths do append a second line
+    /// (`format!("launch failed: {e}\nhint: {h}")` and friends), so
+    /// split at the door: one entry per line, sharing the timestamp.
     pub fn push(&mut self, e: Entry) {
+        if !e.msg.contains('\n') { return self.push_line(e); }
+        let Entry { ts, level, source, msg } = e;
+        for line in msg.split('\n') {
+            self.push_line(Entry {
+                ts, level,
+                source: source.clone(),
+                msg: line.to_string(),
+            });
+        }
+    }
+
+    /// Ring insert for one already-single-line entry.
+    fn push_line(&mut self, e: Entry) {
         if self.entries.len() == self.capacity { self.entries.pop_front(); }
         self.max_line_chars = self.max_line_chars
             .max(e.source.chars().count() + e.msg.chars().count());

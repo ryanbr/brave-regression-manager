@@ -15,6 +15,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .clicked()
             {
                 if let Ok(mut g) = state.console.lock() { g.clear(); }
+                state.console_content_w = 0.0;
             }
             // Copy the entire Console buffer to clipboard, in the
             // same `HH:MM:SS  LEVEL  [source]  msg` shape the panel
@@ -114,8 +115,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // "HH:MM:SS" + 2 + "LEVEL" + 2 + "[" + "]" + 2 = 21 fixed chars
     // around the per-entry `source` + `msg` the ring measured.
     const PREFIX_CHARS: usize = 21;
-    let content_w = (g.max_line_chars() + PREFIX_CHARS) as f32 * char_w;
-    egui::ScrollArea::both()
+    // The char estimate is the floor; `console_content_w` is the running
+    // max of what egui actually laid out, which covers the glyphs the
+    // monospace face doesn't own and whose real advance is wider.
+    let content_w = ((g.max_line_chars() + PREFIX_CHARS) as f32 * char_w)
+        .max(state.console_content_w);
+    let out = egui::ScrollArea::both()
         .auto_shrink([false; 2])
         .stick_to_bottom(true)
         .show_rows(ui, row_h, total, |ui, range| {
@@ -135,4 +140,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     .wrap(false));
             }
         });
+    // Monotonic: never let the extent shrink back when a wide row
+    // scrolls out of the painted range, which is what makes egui clamp
+    // the user's horizontal offset to 0 mid-read.
+    drop(g);
+    state.console_content_w = state.console_content_w.max(out.content_size.x);
 }
