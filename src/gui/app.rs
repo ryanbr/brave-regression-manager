@@ -397,12 +397,15 @@ impl App {
                 use std::collections::HashMap;
                 let mut by_tag: HashMap<String, super::state::ReleaseRow> =
                     rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
-                for json in crate::verdict::all_release_cache_rows() {
-                    if let Ok(mut r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
-                        r.refresh_cached_with(&dl_idx);
-                        r.ensure_channel();
-                        by_tag.entry(r.tag.clone()).or_insert(r);
-                    }
+                // Parse inside the query rather than collecting every
+                // blob first — see map_release_cache_rows. The closure
+                // must not touch the database; it does not.
+                for mut r in crate::verdict::map_release_cache_rows(|j| {
+                    serde_json::from_str::<super::state::ReleaseRow>(j).ok()
+                }) {
+                    r.refresh_cached_with(&dl_idx);
+                    r.ensure_channel();
+                    by_tag.entry(r.tag.clone()).or_insert(r);
                 }
                 // Correct any row whose asset was picked by a build
                 // running on a different CPU architecture — the ARM
@@ -601,10 +604,10 @@ impl App {
                     use std::collections::HashMap;
                     let mut by_tag: HashMap<String, super::state::ReleaseRow> =
                         rows.into_iter().map(|r| (r.tag.clone(), r)).collect();
-                    for json in crate::verdict::all_release_cache_rows() {
-                        if let Ok(r) = serde_json::from_str::<super::state::ReleaseRow>(&json) {
-                            by_tag.entry(r.tag.clone()).or_insert(r);
-                        }
+                    for r in crate::verdict::map_release_cache_rows(|j| {
+                        serde_json::from_str::<super::state::ReleaseRow>(j).ok()
+                    }) {
+                        by_tag.entry(r.tag.clone()).or_insert(r);
                     }
                     rows = by_tag.into_values().collect();
                     rows.sort_by(|a, b| b.published_at.cmp(&a.published_at));

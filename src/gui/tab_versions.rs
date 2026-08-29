@@ -938,6 +938,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // empty band below this panel.
     let rows = state.available.clone();
     let installing_now = state.installing.clone();
+    // Frame-scoped, not per-row: both are read once per painted row.
+    let install_cap = super::state::max_concurrent_installs(&state.github_token);
     if rows.is_empty() && !state.fetching_releases {
         // These used to be drawn inside the list's scope, which raised
         // every text style by 1px. Virtualising moved them above the
@@ -1304,7 +1306,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.set_min_width(COL_STATUS);
                     ui.set_max_width(COL_STATUS);
                     ui.horizontal(|ui| {
-                        render_status_cell(ui, state, r, installed, busy);
+                        render_status_cell(ui, state, r, installed, busy,
+                                           &installing_now, install_cap);
                         if is_manual && ui.button("Remove")
                             .on_hover_text(
                                 "Remove this manually-added tag from the \
@@ -1581,9 +1584,13 @@ fn render_status_cell(
     r: &super::state::ReleaseRow,
     installed: bool,
     busy: bool,
+    // Borrowed from the caller's frame-scoped values. This used to clone
+    // state.installing per row — a whole HashSet<String> allocated for
+    // every painted row, every frame, which cost strictly more than the
+    // per-row String the Cow install_key saves.
+    installing_now: &std::collections::HashSet<String>,
+    install_cap: usize,
 ) {
-    let installing_now = state.installing.clone();
-    let install_cap = super::state::max_concurrent_installs(&state.github_token);
     ui.horizontal(|ui| {
         match (&r.host_asset, installed, busy) {
                     (_, true, _) => { ui.label("installed"); }

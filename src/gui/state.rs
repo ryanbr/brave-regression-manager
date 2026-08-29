@@ -282,13 +282,14 @@ impl ReleaseRow {
     /// one tag get independent verdicts, which is the whole point of
     /// being able to install both.
     ///
-    /// Anything talking to GitHub — compare ranges, tag metadata,
-    /// Chromium pins — must keep using `tag`, never this.
     /// Borrows for a native row — which is every row on a non-ARM host,
     /// and the majority elsewhere — instead of cloning the tag back into
     /// a fresh String. Called several times per row per frame (installed
     /// check, busy check, verdict, note, sort), so the allocation was
     /// paid on each.
+    ///
+    /// Anything talking to GitHub — compare ranges, tag metadata,
+    /// Chromium pins — must keep using `tag`, never this.
     pub fn install_key(&self) -> std::borrow::Cow<'_, str> {
         if self.x86_variant {
             std::borrow::Cow::Owned(format!("{}+x86", self.tag))
@@ -360,6 +361,10 @@ pub fn expand_arch_rows(rows: Vec<ReleaseRow>, show_x86: bool) -> Vec<ReleaseRow
             out.push(v);
         }
     }
+    // Same reason: this Vec backs state.available for the process's
+    // lifetime, and the [x86] expansion pushes past the capacity it was
+    // built with, so it can end up holding close to double what it uses.
+    out.shrink_to_fit();
     out
 }
 
@@ -761,3 +766,4 @@ impl AppState {
         }
     }
 }
+
