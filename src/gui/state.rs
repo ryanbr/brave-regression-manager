@@ -69,6 +69,12 @@ pub type InstallQueue = Arc<Mutex<Vec<(String, Result<String, String>)>>>;
 #[derive(Debug, Default, Clone)]
 pub struct AsyncSlots {
     pub available:        AsyncSlot<Vec<ReleaseRow>>,
+    /// True when the fetch that just completed was the one-shot asset
+    /// backfill walk, so the drain spends `asset_backfill_attempted`
+    /// only on a walk that actually bypassed the short-circuit. A plain
+    /// successful fetch must not consume it: legacy rows merged in from
+    /// sqlite afterwards would then never be backfillable this session.
+    pub fetch_was_backfill: Arc<Mutex<bool>>,
     /// Mid-flight partial fetch results. The streaming GitHub fetcher
     /// writes every page's cumulative output here so the GUI can render
     /// progressively instead of waiting for the full set.

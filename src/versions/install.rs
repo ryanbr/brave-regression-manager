@@ -77,12 +77,22 @@ pub async fn install_tag_with_progress(tag: &str, sink: Option<ProgressSink>) ->
     // keeps the full key so the two builds stay in separate dirs.
     let release = github::get_release(
         crate::versions::base_tag(tag)).await?;
-    if !release.has_host_installer() {
-        return Err(anyhow!("{tag} has no installer for this platform: {} \
-                            (run `brave-regress versions available` to list installable tags)",
-                           release.skip_reason()));
-    }
-    let asset = github::pick_asset(&release)?;
+    // Pick for the install KEY, not the host default. Picking natively
+    // for a "+x86" key put the native binary in the emulated build's
+    // directory — two directories, one binary, two independent
+    // verdicts, one of them false.
+    //
+    // The has_host_installer() guard is the *native* pick, so it must
+    // not gate an emulated install: an x64-only release on an ARM Mac
+    // now has no native asset by design, and the guard would reject the
+    // very install the [x86] row exists to offer.
+    let asset = match github::pick_asset_for_install_key(&release, tag) {
+        Some(a) => a,
+        None => return Err(anyhow!(
+            "{tag} has no installer for this platform: {} \
+             (run `brave-regress versions available` to list installable tags)",
+            release.skip_reason())),
+    };
     install_tag_with_asset(tag, &asset.name, &asset.browser_download_url, asset.size, sink).await
 }
 
