@@ -146,7 +146,12 @@ fn fetch_failure_hint(raw: &str) -> Option<&'static str> {
                      needed), or remove it entirely to fall back to \
                      anonymous access at 60 req/hr.");
     }
-    if lc.contains("403") || lc.contains("rate limit") {
+    // Anchored like the 401 arm above: a bare "403" also matches the
+    // "at line N column 403" tail of a regional-catalog serde error,
+    // which shares this function.
+    if lc.contains("http 403") || lc.contains("403 forbidden")
+        || lc.contains("rate limit")
+    {
         return Some("GitHub rate limit hit. Paste a personal access \
                      token in Settings → GitHub token (no scopes \
                      needed) to bump the anonymous 60 req/hr cap to \
@@ -374,6 +379,16 @@ impl App {
                 if json_fixed > 0 {
                     for r in rows.iter_mut() { r.refresh_cached_with(&dl_idx); }
                     let _ = ReleaseCache::save(&rows);
+                    // sqlite too. These rows win the merge below, so
+                    // repick_for_host_arch returns false for them there
+                    // and their upsert is skipped — which left the stale
+                    // pick in sqlite for exactly the newest tags, ready
+                    // to be merged straight back in after the next fetch.
+                    for r in rows.iter() {
+                        if let Ok(j) = serde_json::to_string(r) {
+                            let _ = crate::verdict::upsert_release_cache_row(&r.tag, &j);
+                        }
+                    }
                 }
                 // Always-on incremental cache — union with everything
                 // sqlite has ever seen so the GUI starts up with the
@@ -605,6 +620,13 @@ impl App {
                         console::warn(&self.state.console, "cache",
                             format!("could not persist releases cache: {e}"));
                     }
+                    // A successful walk has persisted asset lists for
+                    // its window, so the one-shot backfill bypass is
+                    // spent. Marked here rather than at spawn: that walk
+                    // is deep and is the one most likely to hit the rate
+                    // limit, and a failed walk which consumed the flag
+                    // could not be retried without restarting the app.
+                    self.state.asset_backfill_attempted = true;
                     self.state.available = std::sync::Arc::new(
                         super::state::expand_arch_rows(
                             rows, self.state.arch_preference.shows_x86()));

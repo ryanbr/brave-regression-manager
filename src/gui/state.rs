@@ -245,7 +245,13 @@ impl ReleaseRow {
                 self.host_asset  = None;
                 self.asset_url   = None;
                 self.asset_size  = None;
-                self.skip_reason = "no installer for this platform".to_string();
+                // Keep whatever Release::skip_reason() recorded — it
+                // says *why* (wrong channel, symbols-only, …) where this
+                // generic line does not. Only fill in when it is empty.
+                if self.skip_reason.is_empty() {
+                    self.skip_reason =
+                        "no installer for this platform".to_string();
+                }
             }
         }
         self.pick_key = crate::versions::github::current_pick_key();

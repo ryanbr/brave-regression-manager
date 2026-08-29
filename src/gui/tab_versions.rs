@@ -289,6 +289,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             if gch != ch { continue; }
             for (bi, bt, bch) in &bads {
                 if bch != ch { continue; }
+                // Native and emulated builds of one tag reduce to the
+                // same base tag, and semver treats "+x86" as build
+                // metadata so they sort adjacent — distance 1, the
+                // minimum, which beats every genuine pair and makes the
+                // bracket compare/A...A with zero commits. A GOOD native
+                // against a BAD emulated build is a real result, but it
+                // is an architecture difference, not a brave-core range.
+                if gt == bt { continue; }
                 let d = gi.abs_diff(*bi);
                 if d < best_dist {
                     best_dist = d;
@@ -2405,7 +2413,6 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
     // full deep re-walk, the opposite of "self-clearing".
     let backfill      = !state.asset_backfill_attempted
         && state.available.iter().any(|r| r.needs_asset_backfill());
-    if backfill { state.asset_backfill_attempted = true; }
     let slot          = state.slots.available.clone();
     let partial_slot  = state.slots.partial_releases.clone();
     let token         = state.github_token.clone();
@@ -2493,16 +2500,28 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
         // another architecture, cannot be re-picked offline — the
         // asset list it would need was never stored. The incremental
         // short-circuit would skip straight past those rows, so bypass
-        // it once to backfill them. Self-clearing: after this walk the
-        // rows carry their assets and the current arch.
+        // it once to backfill them. Bounded to one attempt per session,
+        // marked spent only once a walk actually succeeds.
         let known = if need_deeper_walk || backfill { Default::default() }
                     else                { verdict::known_release_cache_tags() };
         let dl_idx = super::state::read_downloads_index();
+        // Rows already written to sqlite. `partial` is cumulative, so
+        // upserting all of it per page was O(pages^2) writes; skipping
+        // persistence entirely meant a deep walk that died on page 60
+        // wrote nothing and spent the API budget for no progress.
+        // Persist the delta.
+        let mut persisted = 0usize;
         let result = if !need_deeper_walk {
             versions::github::list_nightly_releases_streaming_incremental(
                 count, tok, stop_at, filter, &known, Some(&console),
                 |partial| {
                     let rows = to_rows(partial, &dl_idx, false);
+                    for r in rows.iter().skip(persisted) {
+                        if let Ok(json) = serde_json::to_string(r) {
+                            let _ = verdict::upsert_release_cache_row(&r.tag, &json);
+                        }
+                    }
+                    persisted = rows.len();
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
                 .map(|rs| to_rows(rs, &dl_idx, true))
@@ -2512,6 +2531,12 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                 count, tok, stop_at, filter, Some(&console),
                 |partial| {
                     let rows = to_rows(partial, &dl_idx, false);
+                    for r in rows.iter().skip(persisted) {
+                        if let Ok(json) = serde_json::to_string(r) {
+                            let _ = verdict::upsert_release_cache_row(&r.tag, &json);
+                        }
+                    }
+                    persisted = rows.len();
                     *partial_slot.lock().unwrap() = Some(rows);
                 }).await
                 .map(|rs| to_rows(rs, &dl_idx, true))
