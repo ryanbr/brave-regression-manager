@@ -936,17 +936,24 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let notes_by_tag    = verdict::all_notes();
     // Fill remaining vertical space so a tall window doesn't show a big
     // empty band below this panel.
-    // Bump every text style up by 1px inside the Available list. Use
-    // `style_mut()` so Arc::make_mut COW-clones the shared Style and
-    // the change actually applies to subsequent child UIs (rows).
     let rows = state.available.clone();
     let installing_now = state.installing.clone();
     if rows.is_empty() && !state.fetching_releases {
-        if state.loading_startup_cache {
-            super::app::weak_label(ui, "(loading cache from disk…)");
-        } else {
-            super::app::weak_label(ui, "(click \"Fetch GitHub releases\" to populate)");
-        }
+        // These used to be drawn inside the list's scope, which raised
+        // every text style by 1px. Virtualising moved them above the
+        // scroll area and out of that scope, silently shrinking them;
+        // the column header was compensated at the time and these were
+        // missed. Same bump, applied locally.
+        ui.scope(|ui| {
+            for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+                font_id.size += 1.0;
+            }
+            if state.loading_startup_cache {
+                super::app::weak_label(ui, "(loading cache from disk…)");
+            } else {
+                super::app::weak_label(ui, "(click \"Fetch GitHub releases\" to populate)");
+            }
+        });
     }
     // Compute how many rows actually clear the active filters and the
     // oldest cached release date — used for the helpful empty-results
@@ -993,6 +1000,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         let oldest_short = oldest.map(short_date).unwrap_or_default();
         let date_filter_active = state.date_from.is_some() || state.date_to.is_some();
         ui.horizontal(|ui| {
+            // Also lost the list's +1 when this moved above the scroll
+            // area — see the empty-state hints above.
+            for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+                font_id.size += 1.0;
+            }
             if date_filter_active {
                 ui.colored_label(Color32::from_rgb(220, 180, 60), format!(
                     "0 of {} releases match the date filter. Cache only goes back to {}.",
@@ -1178,12 +1190,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             };
             let r = &rows[row_idx];
             let is_manual = state.manual_release_tags.contains(&r.tag);
-            // show_rows' auto-id skip assumes one widget per row. These
-            // rows use several, and a variable number — an uninstalled
-            // row adds an Install button, a manual one a Remove button —
-            // so without an explicit id a button's identity shifts when
-            // the first visible row changes. Press Install, scroll
-            // before releasing, and the click is silently dropped.
+            // Gives each row's container a distinct `Ui::id`. Bare
+            // `ui.horizontal` derives it from the parent counter, so
+            // every row shared `parent.id.with("child")`.
+            //
+            // It does NOT affect the Install/Remove button identities —
+            // an earlier comment here claimed it did, and that was
+            // wrong twice over. `child_ui_with_id_source` seeds the
+            // child's auto-id counter from the parent's, and buttons
+            // take their id from that counter rather than from
+            // `Ui::id`; and the scroll-dependent id drift it described
+            // never existed, because `show_rows` calls
+            // `skip_ahead_auto_ids(min_row)` and each entry consumes
+            // exactly one parent auto-id, so a row's seed is a function
+            // of its index alone.
             ui.push_id(row_idx, |ui| {
             ui.horizontal(|ui| {
                 // Reserve a fixed-width cell, then place the widget inside.
@@ -2856,18 +2876,25 @@ fn sort_available_indices(
             Verdict::Unknown  => 5,
         }
     };
+    // Parsed once per row rather than inside the comparator. Both the
+    // Tag arm and the tie-break parse semver, and `Version::parse`
+    // allocates — at n rows that was up to 4 allocating parses per
+    // comparison, O(n log n) of them per repaint, on the list this
+    // module just virtualised the *drawing* of. Now it is n parses.
+    let semvers: Vec<Option<semver::Version>> = rows.iter()
+        .map(|r| semver::Version::parse(r.tag.trim_start_matches('v')).ok())
+        .collect();
+    let by_semver = |ia: usize, ib: usize| -> std::cmp::Ordering {
+        match (&semvers[ia], &semvers[ib]) {
+            (Some(va), Some(vb)) => va.cmp(vb),
+            _ => rows[ia].tag.cmp(&rows[ib].tag),
+        }
+    };
     order.sort_by(|&ia, &ib| {
         let a = &rows[ia];
         let b = &rows[ib];
         let ord = match by {
-            C::Tag => {
-                let pa = semver::Version::parse(a.tag.trim_start_matches('v')).ok();
-                let pb = semver::Version::parse(b.tag.trim_start_matches('v')).ok();
-                match (pa, pb) {
-                    (Some(va), Some(vb)) => va.cmp(&vb),
-                    _ => a.tag.cmp(&b.tag),
-                }
-            }
+            C::Tag => by_semver(ia, ib),
             C::Date => {
                 // Compare only the YYYY-MM-DD prefix that the column
                 // actually displays — sorting on the full timestamp would
@@ -2895,19 +2922,13 @@ fn sort_available_indices(
         };
         // Tag-asc as the stable secondary key — equal primary keys sort
         // by tag so the row order is deterministic between repaints.
-        // Use semver compare (same as the primary Tag sort) rather than
-        // a lexicographic string compare, otherwise within a same-date
-        // group `v1.92.9` lands above `v1.92.13` because '1' < '9'
-        // char-wise.
-        let tie = {
-            let pa = semver::Version::parse(a.tag.trim_start_matches('v')).ok();
-            let pb = semver::Version::parse(b.tag.trim_start_matches('v')).ok();
-            match (pa, pb) {
-                (Some(va), Some(vb)) => va.cmp(&vb),
-                _ => a.tag.cmp(&b.tag),
-            }
-        };
-        let ord = ord.then(tie);
+        // Semver compare (same as the primary Tag sort) rather than a
+        // lexicographic one, otherwise within a same-date group
+        // `v1.92.9` lands above `v1.92.13` because '1' < '9' char-wise.
+        //
+        // `then_with`, not `then`: the tie-break only matters when the
+        // primary key ties, and eager evaluation ran it every time.
+        let ord = ord.then_with(|| by_semver(ia, ib));
         if asc { ord } else { ord.reverse() }
     });
 }
