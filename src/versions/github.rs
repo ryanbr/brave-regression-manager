@@ -245,7 +245,17 @@ async fn list_releases_streaming(
     let mut builder = octocrab::OctocrabBuilder::new();
     // Resolved before the start line below so that line can name the
     // token source even when the token itself turns out to be unusable.
-    let chosen_token = header_token(token)?;
+    // On rejection this returns before the "fetch start" line below,
+    // which the 401 hint promises will name the token source. The error
+    // itself names it, so say so rather than emitting nothing at all.
+    let chosen_token = match header_token(token) {
+        Ok(t) => t,
+        Err(e) => {
+            log("fetch start: aborted — the configured token cannot be \
+                 sent in a header (see the error below)".to_string());
+            return Err(e);
+        }
+    };
     let auth_label = match &chosen_token {
         Some((t, source)) => format!("{source}, present ({} chars)", t.len()),
         None              => "anonymous (60 req/hr cap)".to_string(),
@@ -417,6 +427,24 @@ pub async fn get_release(tag: &str) -> Result<Release> {
 pub fn pick_asset(release: &Release) -> Result<&ReleaseAsset> {
     let channel = detect_release_channel(release);
     pick_asset_for(release, channel)
+}
+
+/// Pick the asset for an *install key*: the suffixed form selects the
+/// emulated build, the bare form the native one.
+///
+/// The fallback install path resolves a release by tag and then picks,
+/// and picking natively for a `+x86` key put the native build into the
+/// emulated build's directory — two directories, the same binary, two
+/// independent verdicts, one of them a lie.
+pub fn pick_asset_for_install_key<'a>(release: &'a Release, key: &str)
+    -> Option<&'a ReleaseAsset>
+{
+    let channel = detect_release_channel(release);
+    if key.ends_with("+x86") {
+        pick_x86_asset(&release.assets, channel)
+    } else {
+        pick_for_host(&release.assets, channel)
+    }
 }
 
 /// The subset of a release's assets worth caching for a later re-pick.
@@ -652,17 +680,23 @@ fn pick_x86_for_host(assets: &[ReleaseAsset], channel: Channel)
 fn pick_x86_for_host(_assets: &[ReleaseAsset], _channel: Channel)
     -> Option<&ReleaseAsset> { None }
 
+/// Module-level so both macOS pickers can use it. It was a closure
+/// inside `pick_for_host`, and `pick_x86_for_host` referencing it from
+/// another fn is a hard compile error on macOS — invisible from Linux,
+/// which instantiates neither, which is how it reached master.
+#[cfg(target_os = "macos")]
+fn is_macos_zip(n: &str) -> bool {
+    let l = n.to_lowercase();
+    (l.contains("darwin") || l.contains("macos") || l.contains("osx")
+     || l.contains("mac-"))
+        && !l.contains("linux") && !l.contains("win32") && !l.contains("win64")
+}
+
 #[cfg(target_os = "macos")]
 fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAsset> {
     let host_arch = std::env::consts::ARCH;
     let want_arm = host_arch == "aarch64";
 
-    let is_macos_zip = |n: &str| -> bool {
-        let l = n.to_lowercase();
-        (l.contains("darwin") || l.contains("macos") || l.contains("osx")
-         || l.contains("mac-"))
-            && !l.contains("linux") && !l.contains("win32") && !l.contains("win64")
-    };
     // Reject `*-symbols.zip` and other debug-info bundles. Without this,
     // alphabetical asset order puts `…-arm64-symbols.zip` before the real
     // `…-arm64.zip` and the picker grabs the symbols archive.
@@ -677,7 +711,15 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
     let zip_x64 = |n: &str| -> bool {
         zip_clean(n) && !n.contains("arm") && !n.contains("aarch64")
     };
-    let zip_any = |n: &str| -> bool { zip_clean(n) };
+    // Excludes the opposite arch on an ARM host, matching the Windows
+    // twin. Without it "Native only" still installed a Rosetta build
+    // under the bare tag for an x64-only release — contradicting the
+    // documented contract — and the native_is_same guard in
+    // expand_arch_rows then suppressed the [x86] row meant to carry it.
+    let zip_any = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        zip_clean(n) && !(want_arm && (l.contains("x64") || l.contains("x86_64")))
+    };
     let dmg_arm = |n: &str| -> bool {
         n.ends_with(".dmg") && name_compatible(n, channel)
             && (n.contains("arm64") || n.contains("aarch64"))
@@ -691,7 +733,9 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
             && n.to_lowercase().contains("universal")
     };
     let dmg_any = |n: &str| -> bool {
+        let l = n.to_lowercase();
         n.ends_with(".dmg") && name_compatible(n, channel)
+            && !(want_arm && (l.contains("x64") || l.contains("x86_64")))
     };
 
     // Native only — Rosetta 2 builds get their own `[x86]` row.
