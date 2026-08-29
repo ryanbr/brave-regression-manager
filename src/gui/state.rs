@@ -128,6 +128,11 @@ pub struct ReleaseRow {
     /// rows cached before this existed. See `github::current_pick_key`.
     #[serde(default)]
     pub pick_key: String,
+    /// True for the derived `[x86]` row on a host that emulates x86-64.
+    /// Never persisted — the cache stores one row per release and the
+    /// variant is expanded at load time from `assets`.
+    #[serde(skip)]
+    pub x86_variant: bool,
     /// True when the asset is already downloaded to the cache directory at
     /// the expected size — install can skip the download and go straight to
     /// extract. Computed at fetch time and refreshed after each install /
@@ -258,6 +263,29 @@ impl ReleaseRow {
             && self.pick_key != crate::versions::github::current_pick_key()
     }
 
+    /// Identity for everything that refers to an *install* rather than a
+    /// GitHub release: the install directory, and the verdict / note /
+    /// launch-args / user-data-dir rows keyed alongside it.
+    ///
+    /// The native build keeps the bare tag, so existing installs and
+    /// every verdict already recorded against them are untouched. Only
+    /// the emulated build takes a suffix, which `versions::list()` then
+    /// discovers as its own installed entry for free — the two builds of
+    /// one tag get independent verdicts, which is the whole point of
+    /// being able to install both.
+    ///
+    /// Anything talking to GitHub — compare ranges, tag metadata,
+    /// Chromium pins — must keep using `tag`, never this.
+    pub fn install_key(&self) -> String {
+        if self.x86_variant { format!("{}+x86", self.tag) } else { self.tag.clone() }
+    }
+
+    /// Strip the variant suffix an install key may carry, to get back to
+    /// the GitHub tag.
+    pub fn base_tag(key: &str) -> &str {
+        key.strip_suffix("+x86").unwrap_or(key)
+    }
+
     pub fn ensure_channel(&mut self) {
         if !self.channel.is_empty() { return; }
         let probe = format!("{} {}",
@@ -266,6 +294,44 @@ impl ReleaseRow {
             else if probe.contains("beta")          { "Beta".into() }
             else                                    { "?".into() };
     }
+}
+
+/// Expand each cached release into the rows the Available list shows:
+/// the native build, plus a derived `[x86]` row wherever the host can
+/// emulate x86-64 and the release actually ships such an asset.
+///
+/// Derived rather than cached, so the two never drift: one stored row
+/// per release stays the source of truth and the variant is rebuilt
+/// from its asset list every time the setting or the host changes.
+/// Rows cached before `assets` was persisted have nothing to expand
+/// from and simply pass through.
+pub fn expand_arch_rows(rows: Vec<ReleaseRow>, show_x86: bool) -> Vec<ReleaseRow> {
+    if !show_x86 || !crate::versions::github::host_can_run_x86_under_emulation() {
+        return rows;
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let ch = crate::versions::github::channel_from_label(&r.channel);
+        let x86 = crate::versions::github::pick_x86_asset(&r.assets, ch)
+            .map(|a| (a.name.clone(), a.browser_download_url.clone(), a.size));
+        let native_is_same = matches!((&x86, &r.host_asset),
+            (Some((n, _, _)), Some(h)) if n == h);
+        out.push(r.clone());
+        if let Some((name, url, size)) = x86 {
+            // Skip when the native pick already *is* that asset: an
+            // x64-only release on an ARM host would otherwise show the
+            // same download twice under two names.
+            if native_is_same { continue; }
+            let mut v = r;
+            v.x86_variant = true;
+            v.host_asset  = Some(name);
+            v.asset_url   = Some(url);
+            v.asset_size  = Some(size);
+            v.skip_reason = String::new();
+            out.push(v);
+        }
+    }
+    out
 }
 
 /// On-disk cache for the available-releases listing so the in-memory

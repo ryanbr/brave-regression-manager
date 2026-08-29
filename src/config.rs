@@ -185,25 +185,24 @@ impl Default for Gui {
 /// pinning either way lets a bisect hold that variable still.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ArchPreference {
-    /// Native build, falling back to x64 when the release shipped no
-    /// ARM asset. What the picker has always done.
-    #[default] Auto,
-    /// Native only. A tag with no ARM build reports "no installer"
-    /// rather than quietly installing an emulated x64 one.
-    NativeOnly,
-    /// Prefer x64 even when a native build exists.
-    PreferX64,
+    /// Native builds only. A release that shipped no ARM asset reports
+    /// "no installer".
+    Native,
+    /// Native builds, plus a separate `[x86]` row for every release that
+    /// also ships an x86-64 asset — so both can be installed side by
+    /// side and carry independent verdicts. Default, because it is the
+    /// only mode that keeps ARM-less releases installable at all.
+    #[default] NativeAndX86,
 }
 impl ArchPreference {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Auto       => "Auto (native, fall back to x64)",
-            Self::NativeOnly => "Native only",
-            Self::PreferX64  => "Prefer x86-64",
+            Self::Native       => "Native only",
+            Self::NativeAndX86 => "Native + x86-64",
         }
     }
-    pub const ALL: [ArchPreference; 3] =
-        [Self::Auto, Self::NativeOnly, Self::PreferX64];
+    pub fn shows_x86(&self) -> bool { matches!(self, Self::NativeAndX86) }
+    pub const ALL: [ArchPreference; 2] = [Self::Native, Self::NativeAndX86];
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

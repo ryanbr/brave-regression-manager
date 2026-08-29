@@ -522,16 +522,17 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                     && cfg!(any(windows, target_os = "macos"))
                 {
                     ui.label("Build architecture:").on_hover_text(
-                        "Which Brave build to install on this ARM machine. \
-                         Auto takes the native ARM build and falls back to \
-                         x86-64 (run under emulation) for releases that \
-                         shipped no ARM asset. Native only reports those \
-                         releases as having no installer instead. Prefer \
-                         x86-64 takes the emulated build even when a \
-                         native one exists.\n\nWhich build is running is \
-                         itself a variable when bisecting — a regression \
-                         may reproduce under emulation but not natively. \
-                         Changing this re-picks every cached release.");
+                        "Which Brave builds this ARM machine offers. \
+                         Native only lists the ARM build, and a release \
+                         that shipped no ARM asset shows no installer. \
+                         Native + x86-64 additionally lists every release \
+                         that ships an x86-64 asset as its own [x86] row, \
+                         run under emulation.\n\nBoth can be installed at \
+                         once and carry separate verdicts: which build is \
+                         running is itself a variable when bisecting, so a \
+                         regression may reproduce under emulation and not \
+                         natively. The [x86] build installs alongside the \
+                         native one rather than replacing it.");
                     let before = state.arch_preference;
                     egui::ComboBox::from_id_source("arch_pref")
                         .selected_text(state.arch_preference.label())
@@ -544,35 +545,26 @@ pub(crate) fn render_settings_panel(ui: &mut Ui, state: &mut AppState, id_suffix
                         });
                     if state.arch_preference != before {
                         state.config_dirty = true;
-                        crate::versions::github::set_arch_preference(
-                            state.arch_preference);
-                        // Every cached row's host_asset was chosen under
-                        // the old preference, and the incremental fetch
-                        // would short-circuit straight past them — so
-                        // redo the picks here, from the stored asset
-                        // lists, and persist.
-                        let mut rows = (*state.available).clone();
-                        let mut repicked = 0usize;
-                        let mut stale = 0usize;
-                        for r in &mut rows {
-                            if r.repick_for_host_arch() {
-                                repicked += 1;
-                                if let Ok(j) = serde_json::to_string(&r) {
-                                    let _ = crate::verdict::upsert_release_cache_row(
-                                        &r.tag, &j);
-                                }
-                            } else if r.needs_asset_backfill() {
-                                stale += 1;
-                            }
-                        }
+                        // The [x86] rows are derived, so re-expanding
+                        // from the stored asset lists is the whole
+                        // update — no network, no cache rewrite. Strip
+                        // any existing variants first so toggling back
+                        // and forth can't accumulate duplicates.
+                        let base: Vec<_> = state.available.iter()
+                            .filter(|r| !r.x86_variant).cloned().collect();
+                        let stale = base.iter()
+                            .filter(|r| r.needs_asset_backfill()).count();
+                        let rows = super::super::state::expand_arch_rows(
+                            base, state.arch_preference.shows_x86());
+                        let shown = rows.iter().filter(|r| r.x86_variant).count();
                         state.available = std::sync::Arc::new(rows);
                         let tail = if stale > 0 {
-                            format!("; {stale} row(s) predate the stored asset \
-                                     list — re-fetch to update those")
+                            format!("; {stale} release(s) predate the stored \
+                                     asset list — re-fetch to include those")
                         } else { String::new() };
                         crate::console::info(&state.console, "config", format!(
-                            "arch_preference: {} ({repicked} release(s) \
-                             re-picked{tail})", state.arch_preference.label()));
+                            "arch_preference: {} ({shown} [x86] row(s){tail})",
+                            state.arch_preference.label()));
                     }
                     ui.end_row();
                 }

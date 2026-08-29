@@ -229,9 +229,6 @@ impl App {
         state.brave_log_level = cfg.gui.brave_log_level;
         state.github_token    = cfg.gui.github_token.clone();
         state.arch_preference = cfg.gui.arch_preference;
-        // Into the pickers before any cache work — the startup re-pick
-        // below compares against a key that encodes this.
-        crate::versions::github::set_arch_preference(state.arch_preference);
         state.freeze_components = cfg.gui.freeze_components;
         state.block_drive_launcher = cfg.gui.block_drive_launcher;
         state.suppress_p3a_banner = cfg.gui.suppress_p3a_banner;
@@ -547,7 +544,9 @@ impl App {
             if let Ok((rows, fetched_at)) = res {
                 let needs_refetch = rows.iter()
                     .any(|r| r.channel == "?" || r.channel.is_empty());
-                self.state.available = std::sync::Arc::new(rows);
+                self.state.available = std::sync::Arc::new(
+                    super::state::expand_arch_rows(
+                        rows, self.state.arch_preference.shows_x86()));
                 self.state.available_fetched_at = fetched_at;
                 if needs_refetch { tab_versions::spawn_fetch(&mut self.state); }
             }
@@ -556,7 +555,9 @@ impl App {
         // list as each page lands so the UI shows progress instead of a
         // blank "fetching…" wait.
         if let Some(partial) = self.state.slots.partial_releases.lock().unwrap().take() {
-            self.state.available = std::sync::Arc::new(partial);
+            self.state.available = std::sync::Arc::new(
+                super::state::expand_arch_rows(
+                    partial, self.state.arch_preference.shows_x86()));
             // Persisting between every page would thrash the cache file;
             // wait for the final result before saving.
         }
@@ -592,7 +593,9 @@ impl App {
                         console::warn(&self.state.console, "cache",
                             format!("could not persist releases cache: {e}"));
                     }
-                    self.state.available = std::sync::Arc::new(rows);
+                    self.state.available = std::sync::Arc::new(
+                        super::state::expand_arch_rows(
+                            rows, self.state.arch_preference.shows_x86()));
                     self.state.available_fetched_at = Some(chrono::Utc::now());
                 }
                 Err(e) => {

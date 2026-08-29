@@ -1125,6 +1125,17 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     // green asset-name label, the blue [cached] pill,
                     // the channel pill colours).
                     if is_manual {
+                        if r.x86_variant {
+                            // Marks the emulated build so a verdict is
+                            // never recorded against the wrong one.
+                            ui.label(RichText::new("[x86]").monospace()
+                                .color(Color32::from_rgb(200, 150, 90)))
+                                .on_hover_text(
+                                    "x86-64 build, run under emulation. \
+                                     Installs alongside the native ARM \
+                                     build of the same tag and keeps its \
+                                     own verdict, note and launch args.");
+                        }
                         ui.label(RichText::new(&r.tag).monospace().strong()
                             .color(Color32::from_rgb(120, 220, 230)));
                     } else {
@@ -1145,7 +1156,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 fixed_cell(ui, COL_VERDICT, &mut |ui| {
-                    let row_verdict = verdicts_by_tag.get(&r.tag).copied().unwrap_or(Verdict::Unknown);
+                    let row_verdict = verdicts_by_tag.get(&r.install_key()).copied().unwrap_or(Verdict::Unknown);
                     if row_verdict != Verdict::Unknown {
                         ui.colored_label(verdict_color(row_verdict),
                             RichText::new(format!("[{}]", verdict_label(row_verdict))).strong());
@@ -1153,7 +1164,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 // Note cell — inline so it can mutate state when clicked.
-                let cur_note = notes_by_tag.get(&r.tag).cloned().unwrap_or_default();
+                let cur_note = notes_by_tag.get(&r.install_key()).cloned().unwrap_or_default();
                 ui.scope(|ui| {
                     ui.set_min_width(COL_NOTE);
                     ui.set_max_width(COL_NOTE);
@@ -1168,14 +1179,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .on_hover_text(hover)
                         .clicked()
                     {
-                        state.editing_note_tag = Some(r.tag.clone());
+                        state.editing_note_tag = Some(r.install_key());
                         state.editing_note_buf = cur_note.clone();
                         state.note_window_just_opened = true;
                     }
                 });
 
-                let installed = versions::is_installed(&r.tag);
-                let busy = installing_now.contains(&r.tag);
+                let installed = versions::is_installed(&r.install_key());
+                let busy = installing_now.contains(&r.install_key());
 
                 // Status/action cell. For manually-added rows, the
                 // Remove button is rendered inside the same fixed-width
@@ -1278,7 +1289,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             .on_hover_text(&cur_note)
                             .clicked()
                         {
-                            state.editing_note_tag = Some(r.tag.clone());
+                            state.editing_note_tag = Some(r.install_key());
                             state.editing_note_buf = cur_note.clone();
                             state.note_window_just_opened = true;
                         }
@@ -1496,8 +1507,11 @@ fn render_status_cell(
                             // stale completed-state doesn't briefly
                             // flash before the new download writes its
                             // first sample. Other tags' entries stay.
-                            progress.lock().unwrap().remove(&r.tag);
-                            let tag2     = r.tag.clone();
+                            progress.lock().unwrap().remove(&r.install_key());
+                            // The install DIRECTORY and every per-install row keyed beside it.
+                            // Native keeps the bare tag, so existing
+                            // installs and their verdicts are untouched.
+                            let tag2     = r.install_key();
                             let name2    = name.clone();
                             let url      = r.asset_url.clone();
                             let size     = r.asset_size;
@@ -1981,6 +1995,7 @@ fn spawn_add_by_tag(state: &mut AppState, tag: String) {
                     skip_reason, cached: false, channel, chromium_version,
                     assets: r.assets,
                     pick_key: versions::github::current_pick_key(),
+                    x86_variant: false,
                 };
                 row.refresh_cached();
                 if let Ok(json) = serde_json::to_string(&row) {
@@ -2122,6 +2137,10 @@ fn collect_report_data(
     let verdicts_by_tag = verdict::all_version_verdicts();
     let mut others: Vec<(String, Verdict, String, String)> = Vec::new();
     for r in state.available.iter() {
+        // One entry per release. The [x86] row is the same brave-core
+        // commit range as its native twin, so listing both would pad the
+        // report with duplicate tags.
+        if r.x86_variant { continue; }
         if r.channel != channel { continue; }
         if r.tag == good || r.tag == bad { continue; }
         let v = verdicts_by_tag.get(&r.tag).copied().unwrap_or(Verdict::Unknown);
@@ -2392,6 +2411,7 @@ pub(super) fn spawn_fetch(state: &mut AppState) {
                     // network call.
                     assets: r.assets,
                     pick_key: versions::github::current_pick_key(),
+                    x86_variant: false,
                 };
                 row.refresh_cached_with(dl_idx);
                 if let Ok(json) = serde_json::to_string(&row) {
@@ -2674,15 +2694,15 @@ fn sort_available_indices(
             }
             C::Channel => a.channel.cmp(&b.channel),
             C::Verdict => {
-                let ra = verdict_rank(verdicts_by_tag.get(&a.tag).copied().unwrap_or(Verdict::Unknown));
-                let rb = verdict_rank(verdicts_by_tag.get(&b.tag).copied().unwrap_or(Verdict::Unknown));
+                let ra = verdict_rank(verdicts_by_tag.get(&a.install_key()).copied().unwrap_or(Verdict::Unknown));
+                let rb = verdict_rank(verdicts_by_tag.get(&b.install_key()).copied().unwrap_or(Verdict::Unknown));
                 ra.cmp(&rb)
             }
             C::Note => {
                 // Two-key sort: rows with notes first, then by note body.
                 let empty = String::new();
-                let na = notes_by_tag.get(&a.tag).unwrap_or(&empty);
-                let nb = notes_by_tag.get(&b.tag).unwrap_or(&empty);
+                let na = notes_by_tag.get(&a.install_key()).unwrap_or(&empty);
+                let nb = notes_by_tag.get(&b.install_key()).unwrap_or(&empty);
                 let pa = if na.is_empty() { 1 } else { 0 };
                 let pb = if nb.is_empty() { 1 } else { 0 };
                 pa.cmp(&pb).then(na.cmp(nb))

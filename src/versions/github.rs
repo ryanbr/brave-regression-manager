@@ -419,41 +419,6 @@ pub fn pick_asset(release: &Release) -> Result<&ReleaseAsset> {
     pick_asset_for(release, channel)
 }
 
-/// The user's architecture preference, mirrored here so the pickers can
-/// read it without threading a parameter through every call site.
-///
-/// `AtomicU8` rather than the `OnceLock` used for the versions-dir
-/// override, because this one is toggled live from Settings and every
-/// cached pick has to be redone the moment it changes.
-static ARCH_PREF: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-pub fn set_arch_preference(p: crate::config::ArchPreference) {
-    use crate::config::ArchPreference as A;
-    let v = match p { A::Auto => 0, A::NativeOnly => 1, A::PreferX64 => 2 };
-    ARCH_PREF.store(v, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn arch_preference() -> crate::config::ArchPreference {
-    use crate::config::ArchPreference as A;
-    match ARCH_PREF.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => A::NativeOnly,
-        2 => A::PreferX64,
-        _ => A::Auto,
-    }
-}
-
-/// Identifies the inputs a cached `host_asset` was chosen under. A row
-/// whose stored key differs from this is re-picked from its stored
-/// asset list. Covers both the host architecture (an ARM build
-/// inheriting an x64 build's cache) and the preference above.
-pub fn current_pick_key() -> String {
-    use crate::config::ArchPreference as A;
-    let pref = match arch_preference() {
-        A::Auto => "auto", A::NativeOnly => "native", A::PreferX64 => "x64",
-    };
-    format!("{}:{pref}", std::env::consts::ARCH)
-}
-
 /// Re-run the host asset pick against an already-known asset list.
 ///
 /// The picked asset is host-architecture-specific, but a cached
@@ -466,6 +431,34 @@ pub fn pick_host_asset(assets: &[ReleaseAsset], channel: Channel)
     -> Option<&ReleaseAsset>
 {
     pick_for_host(assets, channel)
+}
+
+/// The x86-64 asset for a host that can emulate one, or None.
+///
+/// Separate from `pick_host_asset` rather than folded into it as a
+/// fallback: the two are shown as two rows, installed side by side, and
+/// judged independently, so the caller decides which it wants instead of
+/// the picker silently substituting one for the other.
+pub fn pick_x86_asset(assets: &[ReleaseAsset], channel: Channel)
+    -> Option<&ReleaseAsset>
+{
+    if !host_can_run_x86_under_emulation() { return None; }
+    pick_x86_for_host(assets, channel)
+}
+
+/// True when this host runs an ARM build but can execute x86-64 too:
+/// Windows 11 on ARM emulates it, macOS has Rosetta 2. ARM Linux has
+/// neither, so it never offers the row.
+pub fn host_can_run_x86_under_emulation() -> bool {
+    std::env::consts::ARCH == "aarch64" && cfg!(any(windows, target_os = "macos"))
+}
+
+/// Identifies the inputs a cached `host_asset` was chosen under — just
+/// the host architecture, now that the x86 row is derived rather than
+/// substituted. A row whose stored key differs is re-picked from its
+/// stored asset list.
+pub fn current_pick_key() -> String {
+    std::env::consts::ARCH.to_string()
 }
 
 /// Parse the channel label persisted in a cached row.
@@ -580,25 +573,12 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
     // didn't ship an x64 build for that tag (some recent nightlies
     // shipped arm-only), return None — surfaces as "no installer" in
     // the GUI rather than silently installing an unrunnable binary.
-    use crate::config::ArchPreference as A;
-    let pref = arch_preference();
+    // Native only, both ways. On an ARM host the x86-64 build is no
+    // longer a silent fallback here — it is offered as its own `[x86]`
+    // row via `pick_x86_for_host`, so a release with no ARM asset
+    // correctly reports "no installer" on this side.
     let order: Vec<&dyn Fn(&str) -> bool> = if want_arm {
-        match pref {
-            // x64 first, native only as a last resort — for reproducing
-            // a bug under emulation deliberately.
-            A::PreferX64 => vec![
-                &zip_x64, &silent_standalone_x64, &standalone_x64,
-                &zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm],
-            // No x64 tail: a tag with no ARM build must report "no
-            // installer" rather than silently hand back an emulated one.
-            A::NativeOnly => vec![
-                &zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm],
-            // ARM host: prefer arm, then any-arch zip, then arm exe;
-            // finally fall back to x64 (works under Win11-on-ARM emu).
-            A::Auto => vec![
-                &zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm,
-                &zip_x64, &silent_standalone_x64, &standalone_x64],
-        }
+        vec![&zip_arm, &zip_any, &silent_standalone_arm, &standalone_arm]
     } else {
         // x64 host: x64 only. No cross-arch fallback.
         vec![&zip_x64, &zip_any, &silent_standalone_x64, &standalone_x64]
@@ -608,6 +588,53 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
     }
     None
 }
+
+/// The x86-64 Windows asset, for the emulated `[x86]` row on an ARM
+/// host. Deliberately never returns an ARM or arch-less asset — this
+/// row exists to be unambiguously the x86-64 build.
+#[cfg(windows)]
+fn pick_x86_for_host(assets: &[ReleaseAsset], channel: Channel)
+    -> Option<&ReleaseAsset>
+{
+    let exe_ok = |n: &str| -> bool {
+        n.ends_with(".exe") && name_compatible(n, channel)
+    };
+    let is_windows_zip = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        (l.contains("win32") || l.contains("win64") || l.contains("win-")
+         || l.contains("windows-") || l.contains("-win"))
+            && !l.contains("darwin") && !l.contains("linux")
+            && !l.contains("mac") && !l.contains("osx")
+    };
+    let zip_x64 = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        l.ends_with(".zip") && name_compatible(n, channel) && is_windows_zip(n)
+            && !l.contains("pdb") && !l.contains("symbol") && !l.contains("debug")
+            && (l.contains("x64") || l.contains("amd64"))
+            && !l.contains("arm")
+    };
+    let silent_standalone_x64 = |n: &str| -> bool {
+        exe_ok(n) && n.contains("Standalone") && n.contains("Silent")
+            && !n.to_lowercase().contains("arm")
+    };
+    let standalone_x64 = |n: &str| -> bool {
+        exe_ok(n) && n.contains("Standalone")
+            && !n.to_lowercase().contains("arm")
+    };
+    let order: [&dyn Fn(&str) -> bool; 3] =
+        [&zip_x64, &silent_standalone_x64, &standalone_x64];
+    for matcher in order {
+        if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
+    }
+    None
+}
+
+/// No x86 emulation on ARM Linux, and an x64 host has no ARM row to
+/// pair with — `host_can_run_x86_under_emulation` gates the call, this
+/// keeps the symbol resolvable per-platform.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn pick_x86_for_host(_assets: &[ReleaseAsset], _channel: Channel)
+    -> Option<&ReleaseAsset> { None }
 
 #[cfg(target_os = "macos")]
 fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAsset> {
@@ -651,20 +678,34 @@ fn pick_for_host(assets: &[ReleaseAsset], channel: Channel) -> Option<&ReleaseAs
         n.ends_with(".dmg") && name_compatible(n, channel)
     };
 
-    use crate::config::ArchPreference as A;
+    // Native only — Rosetta 2 builds get their own `[x86]` row.
     let order: Vec<&dyn Fn(&str) -> bool> = if want_arm {
-        match arch_preference() {
-            // Rosetta 2 plays the part Windows-on-ARM emulation does.
-            A::PreferX64  => vec![&zip_x64, &dmg_x64, &zip_any, &dmg_uni,
-                                  &dmg_any, &zip_arm, &dmg_arm],
-            A::NativeOnly => vec![&zip_arm, &zip_any, &dmg_arm, &dmg_uni,
-                                  &dmg_any],
-            A::Auto       => vec![&zip_arm, &zip_any, &dmg_arm, &dmg_uni,
-                                  &dmg_any, &dmg_x64, &zip_x64],
-        }
+        vec![&zip_arm, &zip_any, &dmg_arm, &dmg_uni, &dmg_any]
     } else {
         vec![&zip_x64, &zip_any, &dmg_x64, &dmg_uni, &dmg_any, &dmg_arm, &zip_arm]
     };
+    for matcher in order {
+        if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
+    }
+    None
+}
+
+/// The x86-64 macOS asset, for the Rosetta 2 `[x86]` row.
+#[cfg(target_os = "macos")]
+fn pick_x86_for_host(assets: &[ReleaseAsset], channel: Channel)
+    -> Option<&ReleaseAsset>
+{
+    let zip_x64 = |n: &str| -> bool {
+        let l = n.to_lowercase();
+        n.ends_with(".zip") && name_compatible(n, channel) && is_macos_zip(n)
+            && !l.contains("symbol") && !l.contains("pdb") && !l.contains("debug")
+            && !l.contains("arm") && !l.contains("aarch64")
+    };
+    let dmg_x64 = |n: &str| -> bool {
+        n.ends_with(".dmg") && name_compatible(n, channel)
+            && (n.contains("x64") || n.contains("x86_64"))
+    };
+    let order: [&dyn Fn(&str) -> bool; 2] = [&zip_x64, &dmg_x64];
     for matcher in order {
         if let Some(a) = assets.iter().find(|a| matcher(&a.name)) { return Some(a); }
     }
