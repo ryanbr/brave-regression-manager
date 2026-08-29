@@ -1285,6 +1285,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         state.editing_note_tag = Some(r.install_key());
                         state.editing_note_buf = cur_note.clone();
                         state.note_window_just_opened = true;
+                        // Logged so "clicking does nothing" can be told
+                        // apart from "the click never registered",
+                        // without attaching a debugger.
+                        crate::console::info(&state.console, "note",
+                            format!("opening note editor for {}", r.install_key()));
                     }
                 });
 
@@ -1418,6 +1423,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             state.editing_note_tag = Some(r.install_key());
                             state.editing_note_buf = cur_note.clone();
                             state.note_window_just_opened = true;
+                            // Logged so "clicking does nothing" can be told
+                            // apart from "the click never registered",
+                            // without attaching a debugger.
+                            crate::console::info(&state.console, "note",
+                                format!("opening note editor for {}", r.install_key()));
                         }
                     });
                 }
@@ -1447,9 +1457,9 @@ fn render_regression_report_window(ui: &mut Ui, state: &mut AppState) {
     let just_opened = std::mem::take(&mut state.regression_report_just_opened);
     if let Some(p) = state.regression_report_pos {
         if just_opened {
-            win = win.current_pos(p);
+            win = win.current_pos(clamp_to_screen(ui.ctx(), p));
         } else {
-            win = win.default_pos(p);
+            win = win.default_pos(clamp_to_screen(ui.ctx(), p));
         }
     }
     let prev_pos = state.regression_report_pos;
@@ -1686,6 +1696,31 @@ fn render_status_cell(
             });
 }
 
+/// Keep a restored popup position on screen.
+///
+/// Both popups re-open at the spot they were last left, and on the
+/// opening frame they use `current_pos`, which is a hard placement —
+/// egui does not clamp it the way it clamps `default_pos`. So a stored
+/// position that is no longer on the desktop puts the window somewhere
+/// invisible, and clicking the control that opens it appears to do
+/// nothing at all: no error, no console line, no window.
+///
+/// A stored position goes stale easily — a display disconnected, a
+/// resolution or DPI-scaling change, a window dragged near an edge on a
+/// larger monitor. Clamp so the title bar always lands inside the
+/// viewport with enough of the window reachable to drag it back.
+fn clamp_to_screen(ctx: &egui::Context, p: egui::Pos2) -> egui::Pos2 {
+    let screen = ctx.screen_rect();
+    // Leave a grabbable strip: enough width to hit the title bar and
+    // enough height for the bar itself.
+    const KEEP_X: f32 = 120.0;
+    const KEEP_Y: f32 = 24.0;
+    egui::pos2(
+        p.x.clamp(screen.min.x, (screen.max.x - KEEP_X).max(screen.min.x)),
+        p.y.clamp(screen.min.y, (screen.max.y - KEEP_Y).max(screen.min.y)),
+    )
+}
+
 /// Floating popup for editing the freeform note attached to a tag.
 /// Opened by clicking the `+` / `note` cell in the Available list. Stays
 /// modal-feeling but is just an `egui::Window` — Save persists to sqlite,
@@ -1714,9 +1749,9 @@ fn render_note_editor(ui: &mut Ui, state: &mut AppState) {
     let just_opened = std::mem::take(&mut state.note_window_just_opened);
     if let Some(p) = state.note_window_pos {
         if just_opened {
-            win = win.current_pos(p);
+            win = win.current_pos(clamp_to_screen(ui.ctx(), p));
         } else {
-            win = win.default_pos(p);
+            win = win.default_pos(clamp_to_screen(ui.ctx(), p));
         }
     }
     let inner = win.show(ui.ctx(), |ui|
