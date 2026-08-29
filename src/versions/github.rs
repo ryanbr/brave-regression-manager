@@ -183,6 +183,44 @@ pub async fn list_nightly_releases_streaming_incremental(
                             console, on_progress).await
 }
 
+/// Pick the GitHub token to send, and make sure it can legally go in a
+/// header. Returns the token plus a label naming where it came from.
+///
+/// octocrab does not validate: `build()` assembles the header as
+/// `format!("Bearer {}", token).parse().unwrap()` (octocrab 0.39
+/// lib.rs:743), so a byte the header grammar rejects **panics** rather
+/// than erroring — and the release profile sets `panic = "abort"`, so
+/// that takes the whole GUI down with no message at all. A token read
+/// from a file by a launcher script keeps its trailing newline and does
+/// exactly this. Trim the whitespace that causes it and reject anything
+/// still outside the grammar with something the user can act on.
+///
+/// Empty (after trimming) means absent: sending a bare
+/// `Authorization: Bearer` earns a 401 indistinguishable from a revoked
+/// token. All four GitHub call paths route through here so they cannot
+/// drift apart again.
+fn header_token(settings: Option<&str>) -> Result<Option<(String, &'static str)>> {
+    let picked = settings
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .map(|t| (t, "Settings token"))
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|t| (t, "GITHUB_TOKEN env")));
+    let Some((raw, source)) = picked else { return Ok(None) };
+    let t = raw.trim();
+    // Visible ASCII only — the subset every GitHub PAT format uses, and
+    // a strict subset of what a header value permits.
+    if let Some(bad) = t.bytes().find(|b| !(0x21..=0x7e).contains(b)) {
+        return Err(anyhow!(
+            "the GitHub token from {source} contains a character that \
+             cannot be sent in an HTTP header (byte 0x{bad:02x}). Re-copy \
+             the token — an embedded space or line break is the usual \
+             cause."));
+    }
+    Ok(Some((t.to_string(), source)))
+}
+
 async fn list_releases_streaming(
     count: u32,
     token: Option<&str>,
@@ -205,27 +243,12 @@ async fn list_releases_streaming(
 
     let filter = filter.nonempty();
     let mut builder = octocrab::OctocrabBuilder::new();
-    let from_settings = token.map(str::to_string).filter(|s| !s.is_empty());
-    // An empty GITHUB_TOKEN used to slip through `.ok()` and be handed
-    // to `personal_token("")`, which sends a bare `Authorization: Bearer`
-    // and earns a 401 — indistinguishable, before this, from a revoked
-    // token. Treat empty as absent.
-    let auth_label;
-    let chosen_token = match from_settings {
-        Some(t) => {
-            auth_label = format!("Settings token, present ({} chars)", t.len());
-            Some(t)
-        }
-        None => match std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()) {
-            Some(t) => {
-                auth_label = format!("GITHUB_TOKEN env, present ({} chars)", t.len());
-                Some(t)
-            }
-            None => {
-                auth_label = "anonymous (60 req/hr cap)".to_string();
-                None
-            }
-        },
+    // Resolved before the start line below so that line can name the
+    // token source even when the token itself turns out to be unusable.
+    let chosen_token = header_token(token)?;
+    let auth_label = match &chosen_token {
+        Some((t, source)) => format!("{source}, present ({} chars)", t.len()),
+        None              => "anonymous (60 req/hr cap)".to_string(),
     };
     let target = count.max(1) as usize;
     // 200 * 100 = 20 000 raw releases — easily covers Brave's whole
@@ -260,7 +283,7 @@ async fn list_releases_streaming(
         known_tags.map(|k| format!("yes ({} known tags)", k.len()))
             .unwrap_or_else(|| "no (full walk)".into())));
 
-    if let Some(t) = chosen_token {
+    if let Some((t, _)) = chosen_token {
         builder = builder.personal_token(t);
     }
     let octo = builder.build()
@@ -368,7 +391,12 @@ async fn list_releases_streaming(
         if crossed_stop  { stop_reason = "crossed the stop_at date".to_string(); break; }
         if crossed_known { stop_reason = "reached the cached tags".to_string(); break; }
     }
-    log(format!("fetch done: {} releases in {:.1}s ({stop_reason})",
+    // "newly fetched", because on the incremental path the caller then
+    // logs the merged cache total under this same source — a warm
+    // re-fetch would otherwise read "fetch done: 0 releases" directly
+    // above "fetched 812 tags", which is the contradiction this change
+    // deleted the old pre-fetch line to avoid.
+    log(format!("fetch done: {} newly fetched in {:.1}s ({stop_reason})",
         out.len(), started.elapsed().as_secs_f64()));
     Ok(out)
 }
@@ -590,12 +618,7 @@ pub async fn fetch_release_by_tag(tag: &str, token: Option<&str>) -> Result<Rele
         .build()?
         .get(&url)
         .header("Accept", "application/vnd.github+json");
-    let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
-        // Empty means absent — otherwise this sends a bare
-        // `Authorization: Bearer` and earns a 401 that looks exactly
-        // like a revoked token. Same rule as list_releases_streaming.
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()));
-    if let Some(t) = chosen {
+    if let Some((t, _)) = header_token(token)? {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
     let resp = req.send().await?;
@@ -638,12 +661,7 @@ pub async fn fetch_release_metadata(tag: &str, token: Option<&str>)
         .build()?
         .get(&url)
         .header("Accept", "application/vnd.github+json");
-    let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
-        // Empty means absent — otherwise this sends a bare
-        // `Authorization: Bearer` and earns a 401 that looks exactly
-        // like a revoked token. Same rule as list_releases_streaming.
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()));
-    if let Some(t) = chosen {
+    if let Some((t, _)) = header_token(token)? {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
     let resp = req.send().await?;
@@ -666,12 +684,7 @@ pub async fn compare_commits(base: &str, head: &str, token: Option<&str>) -> Res
         .build()?
         .get(&url)
         .header("Accept", "application/vnd.github+json");
-    let chosen = token.map(|s| s.to_string()).filter(|s| !s.is_empty())
-        // Empty means absent — otherwise this sends a bare
-        // `Authorization: Bearer` and earns a 401 that looks exactly
-        // like a revoked token. Same rule as list_releases_streaming.
-        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()));
-    if let Some(t) = chosen {
+    if let Some((t, _)) = header_token(token)? {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
     let resp = req.send().await?;

@@ -95,10 +95,6 @@ pub struct App {
     initial_size_applied: bool,
 }
 
-/// Pattern-match GitHub-fetch failure messages and return a short
-/// actionable hint when we recognise one. Same shape as the install /
-/// launch hint helpers — purely additive context, the raw error
-/// stays visible either way.
 /// Flatten a status message onto one line.
 ///
 /// The bottom status panel is always present specifically so the
@@ -114,6 +110,10 @@ fn status_line(s: &str) -> std::borrow::Cow<'_, str> {
     else                 { std::borrow::Cow::Borrowed(s) }
 }
 
+/// Pattern-match GitHub-fetch failure messages and return a short
+/// actionable hint when we recognise one. Same shape as the install /
+/// launch hint helpers — purely additive context, the raw error
+/// stays visible either way.
 fn fetch_failure_hint(raw: &str) -> Option<&'static str> {
     let lc = raw.to_lowercase();
     // 401. A token that has been revoked, deleted, or has expired —
@@ -140,8 +140,8 @@ fn fetch_failure_hint(raw: &str) -> Option<&'static str> {
         return Some("GitHub rejected the token being used: it has been \
                      revoked, deleted, or expired. The token comes from \
                      Settings -> GitHub token, or from a GITHUB_TOKEN \
-                     environment variable when that field is empty — the \
-                     'fetch start' Console line names which one was sent. \
+                     environment variable when that field is empty (a \
+                     'Fetch GitHub releases' logs which one it sent). \
                      Issue a fresh personal access token (no scopes \
                      needed), or remove it entirely to fall back to \
                      anonymous access at 60 req/hr.");
